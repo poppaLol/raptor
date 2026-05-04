@@ -325,6 +325,120 @@ def test_tier3_success_yields_imported_verdict(tmp_path, monkeypatch):
     assert out[deps[0].key()].verdict == "imported"
 
 
+# ---------------------------------------------------------------------------
+# Go function-level reachability (osv_results → advisory symbols)
+# ---------------------------------------------------------------------------
+
+class _FakeOsvResult:
+    """Minimal stand-in for an OSV query result with advisory symbols."""
+    def __init__(self, dep_key, advisories):
+        self.dep_key = dep_key
+        self.advisories = advisories
+
+
+class _FakeAdvisory:
+    def __init__(self, ecosystem_specific=None):
+        self.ecosystem_specific = ecosystem_specific
+
+
+def test_go_advisory_symbols_upgrade_to_likely_called(tmp_path: Path) -> None:
+    """When OSV advisories carry symbols that appear in the Go source,
+    the verdict should be ``likely_called`` instead of ``imported``."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        'package main\n\n'
+        'import "golang.org/x/crypto/ssh"\n\n'
+        'func main() {\n\tssh.ParsePrivateKey(nil)\n}\n',
+        encoding="utf-8",
+    )
+    dep = _dep("golang.org/x/crypto", ecosystem="Go", version="0.10.0")
+    osv_results = [
+        _FakeOsvResult(
+            dep_key=dep.key(),
+            advisories=[
+                _FakeAdvisory(ecosystem_specific={
+                    "imports": [
+                        {"path": "golang.org/x/crypto/ssh",
+                         "symbols": ["ParsePrivateKey"]},
+                    ],
+                }),
+            ],
+        ),
+    ]
+    out = scan(repo, [dep], osv_results=osv_results)
+    assert out[dep.key()].verdict == "likely_called"
+
+
+def test_go_advisory_symbols_no_match_stays_imported(tmp_path: Path) -> None:
+    """Advisory symbols that don't appear in source: verdict stays imported."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        'package main\n\n'
+        'import "golang.org/x/crypto/ssh"\n\n'
+        'func main() {\n\tssh.Dial("tcp", "host:22", nil)\n}\n',
+        encoding="utf-8",
+    )
+    dep = _dep("golang.org/x/crypto", ecosystem="Go", version="0.10.0")
+    osv_results = [
+        _FakeOsvResult(
+            dep_key=dep.key(),
+            advisories=[
+                _FakeAdvisory(ecosystem_specific={
+                    "imports": [
+                        {"path": "golang.org/x/crypto/ssh",
+                         "symbols": ["ParsePrivateKey"]},
+                    ],
+                }),
+            ],
+        ),
+    ]
+    out = scan(repo, [dep], osv_results=osv_results)
+    assert out[dep.key()].verdict == "imported"
+
+
+def test_go_no_osv_results_falls_back_to_imported(tmp_path: Path) -> None:
+    """Without osv_results, Go deps follow the normal imported/not_reachable path."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        'package main\n\nimport "github.com/pkg/errors"\n',
+        encoding="utf-8",
+    )
+    dep = _dep("github.com/pkg/errors", ecosystem="Go")
+    out = scan(repo, [dep])
+    assert out[dep.key()].verdict == "imported"
+
+
+def test_go_advisory_empty_symbols_stays_imported(tmp_path: Path) -> None:
+    """Advisory with imports but empty symbols list: no upgrade possible."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "main.go").write_text(
+        'package main\n\nimport "github.com/pkg/errors"\n',
+        encoding="utf-8",
+    )
+    dep = _dep("github.com/pkg/errors", ecosystem="Go")
+    osv_results = [
+        _FakeOsvResult(
+            dep_key=dep.key(),
+            advisories=[
+                _FakeAdvisory(ecosystem_specific={
+                    "imports": [{"path": "github.com/pkg/errors", "symbols": []}],
+                }),
+            ],
+        ),
+    ]
+    out = scan(repo, [dep], osv_results=osv_results)
+    assert out[dep.key()].verdict == "imported"
+
+
+# ---------------------------------------------------------------------------
+# Tier-3 escalation: PyPI not_reachable + CVE-bearing → wheel fetch
+# (continued)
+# ---------------------------------------------------------------------------
+
 def test_tier3_skipped_when_http_not_provided(tmp_path, monkeypatch):
     """Tests / pipelines that don't want network calls just don't
     pass http; the escalation must be inert in that case."""

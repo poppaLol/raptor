@@ -81,6 +81,7 @@ def scan(
     http: Optional[Any] = None,
     cache: Optional[Any] = None,
     cve_dep_keys: Optional[Set[str]] = None,
+    osv_results: Optional[List[Any]] = None,
 ) -> Dict[str, Reachability]:
     """Build per-dep ``Reachability`` for every dep we can analyse.
 
@@ -138,9 +139,17 @@ def scan(
         # Dedup by dep name within ecosystem so multiple version rows
         # for the same dep share one resolve call.
         seen: Dict[str, Reachability] = {}
+        # Pre-build advisory symbol map for Go function-level reachability.
+        go_symbols = _build_go_symbol_map(osv_results) if eco == "Go" else {}
         for d in eco_deps:
             if d.name not in seen:
-                seen[d.name] = resolver(d.name, scan_result, target)
+                if eco == "Go" and d.key() in go_symbols:
+                    seen[d.name] = _gomod.resolve_dep(
+                        d.name, scan_result, target=target,
+                        advisory_symbols=go_symbols[d.key()],
+                    )
+                else:
+                    seen[d.name] = resolver(d.name, scan_result, target)
             out[d.key()] = seen[d.name]
 
     # Tier-3 escalation. Only PyPI today; other ecosystems' resolvers
@@ -159,6 +168,34 @@ def scan(
                 cve_dep_keys=cve_dep_keys, http=http, cache=cache,
             )
 
+    return out
+
+
+def _build_go_symbol_map(
+    osv_results: Optional[List[Any]],
+) -> Dict[str, List[str]]:
+    """Extract advisory symbols for Go deps from OSV results.
+
+    Returns ``{dep_key: [symbol_name, ...]}`` from
+    ``advisory.ecosystem_specific.imports[].symbols``.
+    """
+    if not osv_results:
+        return {}
+    out: Dict[str, List[str]] = {}
+    for r in osv_results:
+        if not hasattr(r, "advisories"):
+            continue
+        for adv in r.advisories:
+            es = adv.ecosystem_specific
+            if not es:
+                continue
+            imports = es.get("imports", [])
+            for imp in imports:
+                syms = imp.get("symbols", [])
+                if syms:
+                    out.setdefault(r.dep_key, []).extend(syms)
+    for key in out:
+        out[key] = list(dict.fromkeys(out[key]))
     return out
 
 

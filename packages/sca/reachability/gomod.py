@@ -63,10 +63,15 @@ def resolve_dep(
     scan: Dict[str, List[Tuple[Path, int, bool]]],
     *,
     target: Optional[Path] = None,
+    advisory_symbols: Optional[List[str]] = None,
 ) -> Reachability:
-    """Look up ``dep_name`` (a Go module path) in the scan."""
-    # Match exact OR any sub-path. Cheap loop over scan keys; in practice
-    # scans rarely exceed a few hundred unique imports.
+    """Look up ``dep_name`` (a Go module path) in the scan.
+
+    When ``advisory_symbols`` is provided (from OSV ``ecosystem_specific
+    .imports[].symbols``), a second pass checks whether any of those
+    function/type names appear in the importing Go files. A match
+    upgrades the verdict from ``imported`` to ``likely_called``.
+    """
     matches: List[Tuple[Path, int, bool]] = []
     prefix = dep_name.rstrip("/") + "/"
     for path, hits in scan.items():
@@ -84,6 +89,24 @@ def resolve_dep(
         )
     non_test = [h for h in matches if not h[2]]
     if non_test:
+        if advisory_symbols:
+            symbol_hits = _grep_symbols(non_test, advisory_symbols)
+            if symbol_hits:
+                evidence = _format_evidence(non_test, target=target)
+                evidence.extend(
+                    f"[symbol] {sym}" for sym in symbol_hits[:5]
+                )
+                return Reachability(
+                    verdict="likely_called",
+                    confidence=Confidence(
+                        "high",
+                        reason=(
+                            f"import + advisory symbol(s) "
+                            f"({', '.join(symbol_hits[:3])}) found in source"
+                        ),
+                    ),
+                    evidence=evidence,
+                )
         return Reachability(
             verdict="imported",
             confidence=Confidence(
@@ -100,6 +123,38 @@ def resolve_dep(
         ),
         evidence=_format_evidence(matches, target=target),
     )
+
+
+def _grep_symbols(
+    hits: List[Tuple[Path, int, bool]],
+    symbols: List[str],
+) -> List[str]:
+    """Check whether any advisory-listed symbols appear in the source files.
+
+    Returns the subset of ``symbols`` that were found (identifier-boundary
+    match, not substring).
+    """
+    files_checked: set = set()
+    file_contents: Dict[Path, str] = {}
+    for f, _, _ in hits:
+        if f in files_checked:
+            continue
+        files_checked.add(f)
+        try:
+            file_contents[f] = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+    if not file_contents:
+        return []
+
+    found: List[str] = []
+    combined = "\n".join(file_contents.values())
+    for sym in symbols:
+        pat = re.compile(r"\b" + re.escape(sym) + r"\b")
+        if pat.search(combined):
+            found.append(sym)
+    return found
 
 
 # ---------------------------------------------------------------------------
