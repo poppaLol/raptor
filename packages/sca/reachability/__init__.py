@@ -174,26 +174,70 @@ def scan(
                 cve_dep_keys=cve_dep_keys, http=http, cache=cache,
             )
 
-    # Function-level reachability tier (PyPI). Inventory-based
-    # resolver from ``core.inventory.reachability``. Gated on the
-    # presence of advisory-shipped affected-function data — when no
-    # PyPI dep has any, this is a no-op (no inventory build, no
-    # resolver imports). Runs after tier-3 wheel-fetch so it
-    # operates on the most upgraded set of verdicts.
+    # Function-level reachability tier. Inventory-based resolver
+    # from ``core.inventory.reachability`` consumes per-language
+    # call_graph data emitted by the inventory builder (Python AST
+    # + JS / TS tree-sitter). Gated per-ecosystem on the presence
+    # of advisory-shipped affected-function data — when no dep in
+    # an ecosystem has any, that ecosystem's tier is a no-op (no
+    # inventory build, no resolver imports). Runs after tier-3
+    # wheel-fetch so it operates on the most upgraded verdict set.
+    #
+    # Inventory is built ONCE per run when at least one ecosystem
+    # tier has work to do; subsequent tiers reuse it via the
+    # ``inventory`` kwarg.
     if osv_results:
+        shared_inventory = None
+
         from .python_function_level import (
             build_pypi_symbol_map,
             refine_pypi_verdicts,
         )
         pypi_symbols = build_pypi_symbol_map(osv_results)
         if pypi_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
             refine_pypi_verdicts(
                 deps_list, out,
                 target=target,
                 pypi_symbol_map=pypi_symbols,
+                inventory=shared_inventory,
+            )
+
+        from .npm_function_level import (
+            build_npm_symbol_map,
+            refine_npm_verdicts,
+        )
+        npm_symbols = build_npm_symbol_map(osv_results)
+        if npm_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
+            refine_npm_verdicts(
+                deps_list, out,
+                target=target,
+                npm_symbol_map=npm_symbols,
+                inventory=shared_inventory,
             )
 
     return out
+
+
+def _shared_inventory(target: Path, current: Optional[Any]) -> Any:
+    """Build the inventory once and share across function-level
+    tiers. ``current`` is the value cached so far (None on first
+    call). Returns the cached or freshly-built inventory."""
+    if current is not None:
+        return current
+    try:
+        from core.inventory.builder import build_inventory
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            return build_inventory(str(target), td)
+    except Exception:                                # noqa: BLE001
+        logger.warning(
+            "sca.reachability: inventory build failed; "
+            "function-level tiers will skip",
+            exc_info=True,
+        )
+        return None
 
 
 def _build_go_symbol_map(
