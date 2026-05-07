@@ -249,6 +249,62 @@ def scan(
                 inventory=shared_inventory,
             )
 
+        from .cargo_function_level import (
+            build_cargo_symbol_map,
+            refine_cargo_verdicts,
+        )
+        cargo_symbols = build_cargo_symbol_map(osv_results)
+        if cargo_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
+            refine_cargo_verdicts(
+                deps_list, out,
+                target=target,
+                cargo_symbol_map=cargo_symbols,
+                inventory=shared_inventory,
+            )
+
+        from .rubygems_function_level import (
+            build_rubygems_symbol_map,
+            refine_rubygems_verdicts,
+        )
+        rubygems_symbols = build_rubygems_symbol_map(osv_results)
+        if rubygems_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
+            refine_rubygems_verdicts(
+                deps_list, out,
+                target=target,
+                rubygems_symbol_map=rubygems_symbols,
+                inventory=shared_inventory,
+            )
+
+        from .nuget_function_level import (
+            build_nuget_symbol_map,
+            refine_nuget_verdicts,
+        )
+        nuget_symbols = build_nuget_symbol_map(osv_results)
+        if nuget_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
+            refine_nuget_verdicts(
+                deps_list, out,
+                target=target,
+                nuget_symbol_map=nuget_symbols,
+                inventory=shared_inventory,
+            )
+
+        from .packagist_function_level import (
+            build_packagist_symbol_map,
+            refine_packagist_verdicts,
+        )
+        packagist_symbols = build_packagist_symbol_map(osv_results)
+        if packagist_symbols:
+            shared_inventory = _shared_inventory(target, shared_inventory)
+            refine_packagist_verdicts(
+                deps_list, out,
+                target=target,
+                packagist_symbol_map=packagist_symbols,
+                inventory=shared_inventory,
+            )
+
     return out
 
 
