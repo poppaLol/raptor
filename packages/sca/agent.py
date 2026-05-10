@@ -35,6 +35,7 @@ import argparse
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -137,24 +138,47 @@ def run_sca_subprocess(
         *sandbox_args,
     ]
 
-    result = sandbox_run(
-        cmd,
-        use_egress_proxy=True,
-        proxy_hosts=_compose_proxy_hosts(target),
-        caller_label="sca-agent",
-        target=str(target),
-        output=str(output_dir),
-        # ``env if env is not None`` — pre-fix ``env or`` truthy-tested,
-        # so an EXPLICIT ``env={}`` (caller's "spawn with empty env"
-        # signal) got replaced with the default safe env because
-        # ``{}`` is falsy. The empty-env intent was silently
-        # overridden — sandbox children inherited the caller-default
-        # RAPTOR env when caller had specifically asked for nothing.
-        env=env if env is not None else RaptorConfig.get_safe_env(),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    # Wrap sandbox_run in a TimeoutExpired catch. The function's
+    # return-type contract is ``(returncode, stdout, stderr)`` —
+    # pre-fix a TimeoutExpired exception escaped past the call
+    # site and surfaced to callers as an unhandled traceback when
+    # the docstring promised a tuple. Convert to a synthetic-
+    # failure tuple so callers' ``if rc != 0`` paths fire
+    # predictably.
+    try:
+        result = sandbox_run(
+            cmd,
+            use_egress_proxy=True,
+            proxy_hosts=_compose_proxy_hosts(target),
+            caller_label="sca-agent",
+            target=str(target),
+            output=str(output_dir),
+            # ``env if env is not None`` — pre-fix ``env or`` truthy-tested,
+            # so an EXPLICIT ``env={}`` (caller's "spawn with empty env"
+            # signal) got replaced with the default safe env because
+            # ``{}`` is falsy. The empty-env intent was silently
+            # overridden — sandbox children inherited the caller-default
+            # RAPTOR env when caller had specifically asked for nothing.
+            env=env if env is not None else RaptorConfig.get_safe_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface as a non-zero exit code with a structured stderr
+        # message. Stdout from the partial run (if any) is
+        # preserved so the caller's parsing layer can salvage what
+        # landed.
+        partial_stdout = (
+            exc.stdout.decode("utf-8", errors="replace")
+            if isinstance(exc.stdout, (bytes, bytearray))
+            else (exc.stdout or "")
+        )
+        return (
+            -1,
+            partial_stdout,
+            f"sca-agent timed out after {timeout}s",
+        )
     return result.returncode, result.stdout, result.stderr
 
 
