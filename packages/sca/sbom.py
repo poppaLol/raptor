@@ -32,6 +32,7 @@ from core.security.prompt_output_sanitise import sanitise_string
 # two emitters stay in sync.
 _SBOM_DESCRIPTION_MAX_CHARS = 2000
 import logging
+import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,10 +63,12 @@ def write_sbom_json(
     deps: Sequence[Dependency],
     vuln_findings: Sequence[VulnFinding] = (),
     target_name: Optional[str] = None,
+    serial_number: Optional[str] = None,
 ) -> int:
     """Atomically write the merged SBOM+VEX document; return component count."""
     bom = build_bom(deps=deps, vuln_findings=vuln_findings,
-                    target_name=target_name)
+                    target_name=target_name,
+                    serial_number=serial_number)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as fh:
@@ -80,15 +83,26 @@ def build_bom(
     vuln_findings: Sequence[VulnFinding] = (),
     target_name: Optional[str] = None,
     generated_at: Optional[datetime] = None,
+    serial_number: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Return the CycloneDX 1.5 BOM dict (in serialisation order)."""
+    """Return the CycloneDX 1.5 BOM dict (in serialisation order).
+
+    ``serial_number`` — a ``urn:uuid:`` identifier for this
+    specific BOM instance. CycloneDX-OPTIONAL but preferred by
+    consumers (Dependency-Track keys on it to detect BOM
+    re-uploads vs new BOMs). Defaults to a freshly-generated
+    UUID per call. Tests inject a fixed UUID for determinism.
+    """
     generated_at = generated_at or datetime.now(timezone.utc)
+    if serial_number is None:
+        serial_number = f"urn:uuid:{uuid.uuid4()}"
     components, by_key = _build_components(deps)
     vulnerabilities = _build_vulnerabilities(vuln_findings, by_key)
 
     bom: Dict[str, Any] = OrderedDict()
     bom["bomFormat"] = _BOM_FORMAT
     bom["specVersion"] = _SPEC_VERSION
+    bom["serialNumber"] = serial_number
     bom["version"] = 1
     bom["metadata"] = {
         "timestamp": generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),

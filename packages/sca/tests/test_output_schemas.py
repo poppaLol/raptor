@@ -138,10 +138,12 @@ def test_sbom_top_level_invariants(
     scan_outputs: Dict[str, Any],
 ) -> None:
     """CycloneDX 1.5 truly-required root fields:
-    ``bomFormat == "CycloneDX"`` and ``specVersion``. Everything
-    else (``serialNumber``, ``version``, ``metadata``,
-    ``components``) is spec-optional; we check those separately
-    where present."""
+    ``bomFormat == "CycloneDX"`` and ``specVersion``. Plus
+    ``serialNumber`` (urn:uuid:) and ``version`` (int): both
+    are CycloneDX-OPTIONAL per spec but RAPTOR always emits
+    them — Dependency-Track keys on serialNumber to detect
+    BOM re-uploads vs new BOMs. Regressing the emitter to
+    omit them would break that workflow."""
     sbom = scan_outputs["sbom"]
     assert sbom.get("bomFormat") == "CycloneDX"
     assert "specVersion" in sbom
@@ -149,14 +151,16 @@ def test_sbom_top_level_invariants(
     # on a regression to <1.5.
     spec = sbom["specVersion"]
     assert spec >= "1.5", f"specVersion {spec} below 1.5 floor"
-    # If serialNumber is present, validate its shape (urn:uuid:).
-    if "serialNumber" in sbom:
-        assert sbom["serialNumber"].startswith("urn:uuid:"), (
-            f"serialNumber={sbom['serialNumber']!r} not a urn:uuid"
-        )
-    # If version is present, it's an int per spec.
-    if "version" in sbom:
-        assert isinstance(sbom["version"], int)
+    # serialNumber + version: RAPTOR always emits them.
+    assert "serialNumber" in sbom, (
+        "RAPTOR's SBOM emitter must set serialNumber for "
+        "Dependency-Track BOM-identity tracking"
+    )
+    assert sbom["serialNumber"].startswith("urn:uuid:"), (
+        f"serialNumber={sbom['serialNumber']!r} not a urn:uuid"
+    )
+    assert "version" in sbom
+    assert isinstance(sbom["version"], int)
 
 
 def test_sbom_components_is_list(
