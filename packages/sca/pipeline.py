@@ -369,6 +369,24 @@ def run_sca(
         )
         progress.done(f"{len(supply_chain_findings)} findings")
 
+        # 2a.i — wheel-platform compat hygiene check. Lives here
+        # rather than under ``hygiene`` because it needs the PyPI
+        # client; hygiene proper is mechanical/offline. Emits
+        # ``HygieneFinding`` records of kind ``platform_compat``
+        # for PyPI exact-pinned deps whose wheels can't install
+        # on one of the project's discovered platforms (e.g.
+        # the canonical z3-solver==4.16.0.0 bite on aarch64 +
+        # glibc 2.36 devcontainers).
+        from .wheel_compat.scan import evaluate_platform_compat
+        progress.stage("platform-compat")
+        platform_compat_findings = evaluate_platform_compat(
+            joined, target=target, pypi_client=sc_pypi,
+        )
+        hygiene_findings.extend(platform_compat_findings)
+        progress.done(
+            f"{len(platform_compat_findings)} wheel-compat findings"
+        )
+
     # 2b. License-policy: enrich (network-dependent) + evaluate
     #     (mechanical). Enrichment fetches from PyPI / npm registry
     #     metadata; evaluation classifies against operator policy

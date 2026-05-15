@@ -290,6 +290,7 @@ HygieneKind = Literal[
     "unpinned_dependency",
     "loose_pin",
     "cross_manifest_inconsistency",
+    "platform_compat",
 ]
 
 
