@@ -46,7 +46,17 @@ def parse_manifest(path: Path) -> List[Dependency]:
 
     out: List[Dependency] = []
     seen_keys: set = set()
-    for json_key, scope in (("require", "main"), ("require-dev", "dev")):
+    # ``replace``: this package CLAIMS to provide the listed
+    # packages — consumers seeing ``foo/replacement`` with
+    # ``replace: {foo/original: "*"}`` get ``foo/original`` from
+    # the replacement, not from the registry. Surface as
+    # scope="replaces" so downstream consumers know this isn't
+    # a real install-set entry; the dep's CVEs may or may not
+    # apply depending on what the replacer actually ships.
+    for json_key, scope in (
+        ("require", "main"), ("require-dev", "dev"),
+        ("replace", "replaces"), ("provide", "provides"),
+    ):
         block = data.get(json_key) or {}
         if not isinstance(block, dict):
             continue

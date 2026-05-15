@@ -369,6 +369,24 @@ def run_sca(
         )
         progress.done(f"{len(supply_chain_findings)} findings")
 
+        # 2a.0 — yanked-version detection. Cross-ecosystem; flags
+        # exact-pinned deps whose registry marks them yanked.
+        from .supply_chain.yanked_versions import scan_pinned_versions
+        progress.stage("yanked-versions")
+        from .registries.pypi import PyPIClient as _PypiYC
+        from .registries.npm import NpmClient as _NpmYC
+        from .registries.crates import CratesClient as _CratesYC
+        from .registries.rubygems import RubyGemsClient as _GemYC
+        yanked_findings = scan_pinned_versions(
+            joined,
+            pypi_client=_PypiYC(http, cache, offline=options.offline),
+            npm_client=_NpmYC(http, cache, offline=options.offline),
+            cargo_client=_CratesYC(http, cache, offline=options.offline),
+            rubygems_client=_GemYC(http, cache, offline=options.offline),
+        )
+        hygiene_findings.extend(yanked_findings)
+        progress.done(f"{len(yanked_findings)} yanked-version finding(s)")
+
         # 2a.i — wheel-platform compat hygiene check. Lives here
         # rather than under ``hygiene`` because it needs the PyPI
         # client; hygiene proper is mechanical/offline. Emits

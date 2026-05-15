@@ -291,6 +291,7 @@ HygieneKind = Literal[
     "loose_pin",
     "cross_manifest_inconsistency",
     "platform_compat",
+    "yanked_version",
 ]
 
 

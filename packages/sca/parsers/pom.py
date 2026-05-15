@@ -56,12 +56,18 @@ _POM_NS = "http://maven.apache.org/POM/4.0.0"
 
 _PROPERTY_RE = re.compile(r"\$\{([^}]+)\}")
 
-# Scope values defined by Maven. Anything else falls through to "main".
+# Scope values defined by Maven. ``main`` is the runtime
+# ship-with-the-product set; ``provided`` / ``system`` are
+# "supplied by the runtime container" — CVEs there apply only
+# if the runtime version matches the declared version, so
+# they're surfaced under a distinct scope for severity
+# triage. ``test`` deps don't ship and should be tier-downgraded
+# downstream.
 _SCOPE_MAP = {
     "compile": "main",
     "runtime": "main",
-    "provided": "main",
-    "system": "main",
+    "provided": "provided",
+    "system": "system",
     "test": "test",
     "import": "build",
 }

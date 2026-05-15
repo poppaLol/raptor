@@ -48,6 +48,7 @@ from . import gha_drift as _gha_drift
 from . import gha_freshness as _gha_freshness
 from . import gha_sunset as _gha_sunset
 from . import git_drift as _git_drift
+from . import cargo_build_scripts as _cargo_build
 from . import install_hooks as _install_hooks
 from . import python_imports as _python_imports
 from . import registry_metadata as _registry_metadata
@@ -89,6 +90,21 @@ def evaluate(
 
     for hit in _install_hooks.scan_manifests(manifests_list, deps_list):
         out.append(_install_hook_to_finding(hit))
+
+    for cbs in _cargo_build.scan_manifests(manifests_list, deps_list):
+        out.append(SupplyChainFinding(
+            finding_id=(
+                f"sca:supply_chain:install_hook_suspicious:Cargo:"
+                f"{cbs.dependency.declared_in}"
+            ),
+            kind="install_hook_suspicious",
+            dependency=cbs.dependency,
+            detail=cbs.detail,
+            evidence={"file": "build.rs",
+                      "ecosystem": "Cargo"},
+            severity=cbs.severity,
+            confidence=cbs.confidence,
+        ))
 
     for sh in _sentinel.scan_deps(deps_list):
         out.append(_sentinel_to_finding(sh))
