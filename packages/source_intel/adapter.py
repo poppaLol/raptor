@@ -854,7 +854,20 @@ def _fortify_source_blocks_finding(
     if bf is None:
         return False
     level = bf.fortify_source_level
-    if level is None or level < 2:
+    if level is None:
+        return False
+    # Source-aware threshold:
+    #   * glibc: levels 1/2/3 distinct; level 1 only intercepts a
+    #     subset (mostly read-class). Require >= 2 to assume the
+    #     full intercept list applies.
+    #   * kernel: CONFIG_FORTIFY_SOURCE doesn't tier — `_from_kconfig`
+    #     maps "enabled" to level=1 by convention, but it intercepts
+    #     the same write-class calls as glibc level 2. Accept level
+    #     >= 1 when source is kconfig.
+    if bf.source == "kconfig":
+        if level < 1:
+            return False
+    elif level < 2:
         return False
 
     rid = finding.rule_id or ""
@@ -866,6 +879,82 @@ def _fortify_source_blocks_finding(
         return False
 
     # Token-boundary scan: split on non-identifier chars.
-    import re as _re
-    tokens = set(_re.findall(r"[A-Za-z_][A-Za-z0-9_]*", snippet))
-    return bool(tokens & _FORTIFIED_WRITE_CALLS)
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", snippet))
+    if not (tokens & _FORTIFIED_WRITE_CALLS):
+        return False
+
+    # Destination-classifier guard: FORTIFY only intercepts when the
+    # destination's size is compile-known via __builtin_object_size().
+    # Static arrays (`char buf[N]`) qualify; pointers to dynamic memory
+    # (`char *buf = malloc(want)`) DON'T — FORTIFY passes them through
+    # unchecked. Without this guard the verdict policy over-suppresses
+    # findings on malloc'd destinations, which is the common case in
+    # most userspace.
+    if _fortified_dest_is_variable_size(finding):
+        return False
+    return True
+
+
+_DYNAMIC_ALLOCATORS_PATTERN = re.compile(
+    r"\b(?:malloc|calloc|realloc|reallocarray|"
+    r"kmalloc|kzalloc|kcalloc|kmalloc_array|krealloc|"
+    r"kvmalloc|kvzalloc|kvmalloc_node|"
+    r"vmalloc|vzalloc|vmalloc_node|"
+    r"alloca|__builtin_alloca|"
+    r"strdup|strndup|kstrdup|kstrdup_const|kstrndup|"
+    r"kmemdup|kmemdup_nul)\s*\("
+)
+
+
+def _fortified_dest_is_variable_size(finding: Finding) -> bool:
+    """Best-effort: extract the destination variable from the sink
+    snippet (first identifier-argument of the fortified call) and
+    scan the source file's enclosing function body for a line
+    declaring or assigning ``dest = <dynamic-allocator>(...)``.
+
+    Returns True iff such a line is found AND it lies between the
+    function start and the sink — i.e., the destination IS pointer-to-
+    heap, FORTIFY can't intercept it.
+
+    Conservative on failure: returns False when we can't extract a
+    dest var or read the file, leaving the verdict policy unchanged.
+    """
+    snippet = finding.sink.snippet or ""
+    # Match the first identifier inside the call's argument list:
+    # `strcpy(buf, src)` → "buf"; `memcpy(dst, src, n)` → "dst"
+    m = re.search(
+        r"[A-Za-z_][A-Za-z0-9_]*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\b",
+        snippet,
+    )
+    if not m:
+        return False
+    dest_var = m.group(1)
+
+    sink_path = finding.sink.file_path or ""
+    sink_line = finding.sink.line or 0
+    if not sink_path or not sink_line:
+        return False
+
+    sink_path_abs = sink_path
+    if not Path(sink_path).is_absolute():
+        sink_path_abs = str((_DEFAULT_REPO_ROOT / sink_path).resolve())
+
+    try:
+        with open(sink_path_abs, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return False
+
+    # Scope: scan up to 200 lines before the sink (typical function
+    # body); we don't have function-bounds info here so use a bounded
+    # window. Look for `dest_var = <dyn-alloc>(`.
+    assign_pat = re.compile(
+        r"\b" + re.escape(dest_var) + r"\s*=\s*\(?\s*[^=;]*?"
+        + _DYNAMIC_ALLOCATORS_PATTERN.pattern[:-2] + r"\("
+    )
+    start = max(0, sink_line - 200)
+    end = min(sink_line, len(lines))
+    for i in range(start, end):
+        if assign_pat.search(lines[i]):
+            return True
+    return False

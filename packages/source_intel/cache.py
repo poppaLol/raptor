@@ -129,6 +129,22 @@ def _hash_target_tree(target: Path) -> str:
         h.update(b"\x00")
         h.update(_file_hash(path).encode("utf-8"))
         h.update(b"\x00")
+
+    # Build markers meaningfully affect analyze()'s build_flags output;
+    # two targets with identical .c files but different Makefile /
+    # compile_commands.json / .config would otherwise collide on the
+    # content-only hash and return the wrong cached BuildFlagsContext.
+    # Surfaced by axis-6 corpus fixtures `fortify_kconfig/` and
+    # `fortify_makefile/` (identical `u.c` but different build markers).
+    for marker in ("Makefile", "GNUmakefile", "Kbuild",
+                   "compile_commands.json", ".config"):
+        mp = target / marker
+        if mp.is_file():
+            h.update(b"BUILD\x00")
+            h.update(marker.encode("utf-8"))
+            h.update(b"\x00")
+            h.update(_file_hash(mp).encode("utf-8"))
+            h.update(b"\x00")
     return h.hexdigest()
 
 
