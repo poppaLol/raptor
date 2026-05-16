@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from core.http import HttpClient
+from core.zip import extract_files_from_zip
 from .models import Advisory
 from .osv import parse_osv_record
 from .versions import VersionError, in_range as _in_range
@@ -230,36 +231,52 @@ class OsvOfflineDB:
         self._conn.execute(
             "DELETE FROM advisories WHERE ecosystem = ?", (ecosystem,))
 
+        # Substrate-based safe walk. ``core.zip.extract_files_from_zip``
+        # centralises zip-slip / symlink / oversize / compression-bomb /
+        # entry-count defences — stronger than the pre-migration inline
+        # ``..`` / abs-path checks.
+        #
+        # Skipped-counter preservation: the substrate silently drops
+        # entries that fail any safety check (logged at debug). To keep
+        # the operator-visible ``skipped`` metric meaningful, we
+        # separately count ``.json`` entries in the archive and
+        # attribute the (expected - returned) delta to safety drops.
+        # An IOError opening the zip falls through to the substrate
+        # returning {}, which triggers the "no advisories" branch.
+        expected_json_entries = 0
         try:
-            with zipfile.ZipFile(BytesIO(blob)) as zf:
-                for info in zf.infolist():
-                    if not info.filename.endswith(".json"):
-                        continue
-                    # Zip-slip protection: refuse paths with ``..`` /
-                    # absolute components.
-                    if (".." in Path(info.filename).parts
-                            or info.filename.startswith("/")):
-                        skipped += 1
-                        continue
-                    try:
-                        raw = zf.read(info)
-                    except (zipfile.BadZipFile, OSError):
-                        skipped += 1
-                        continue
-                    try:
-                        record = json.loads(raw)
-                    except json.JSONDecodeError:
-                        skipped += 1
-                        continue
-                    advisories_added = self._insert_record(
-                        ecosystem, record, raw_json=raw.decode(
-                            "utf-8", errors="replace"),
-                    )
-                    added += advisories_added
+            with zipfile.ZipFile(BytesIO(blob)) as _zf_count:
+                for _info in _zf_count.infolist():
+                    if _info.filename.endswith(".json"):
+                        expected_json_entries += 1
         except zipfile.BadZipFile as e:
             logger.warning(
                 "sca.osv_offline: invalid zip for %s: %s", ecosystem, e)
             return None
+        files = extract_files_from_zip(
+            blob,
+            selector=lambda info: (
+                info.filename if info.filename.endswith(".json") else None
+            ),
+        )
+        if not files and expected_json_entries == 0:
+            logger.warning(
+                "sca.osv_offline: no advisories extracted for %s "
+                "(zip empty / invalid / over entry cap)", ecosystem,
+            )
+            return None
+        skipped += expected_json_entries - len(files)
+        for filename, raw in files.items():
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            advisories_added = self._insert_record(
+                ecosystem, record, raw_json=raw.decode(
+                    "utf-8", errors="replace"),
+            )
+            added += advisories_added
 
         self._conn.execute(
             "INSERT OR REPLACE INTO ingest_meta (ecosystem, ingested_at) "
