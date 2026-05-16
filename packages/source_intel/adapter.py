@@ -255,6 +255,9 @@ class SourceIntelValidator:
         if _fortify_source_blocks_finding(finding, result):
             return ValidatorVerdict.NOT_EXPLOITABLE
 
+        if _downstream_check_suppresses_finding(finding):
+            return ValidatorVerdict.NOT_EXPLOITABLE
+
         if _unchecked_alloc_supports_finding(finding, result):
             return ValidatorVerdict.EXPLOITABLE
 
@@ -353,7 +356,7 @@ def _finding_in_dead_code(finding: Finding, repo_root: Path) -> bool:
         return False
     if facts.function_has_callers(finding_fn):
         return False
-    # Final guard: PR-4's function_inventory.cocci only tracks direct
+    # Final guard 1: PR-4's function_inventory.cocci only tracks direct
     # `funcname(args)` invocations. It misses function-pointer uses
     # (kernel struct ops vtables: `.mgmt_tx = brcmf_cfg80211_mgmt_tx,`,
     # callback registration: `register_handler(my_handler);`,
@@ -361,7 +364,61 @@ def _finding_in_dead_code(finding: Finding, repo_root: Path) -> bool:
     # IS reachable — skip the dead-code verdict.
     if _function_referenced_as_pointer(target, finding_fn):
         return False
+
+    # Final guard 2: naming-convention. Kernel code routinely
+    # registers handlers via macro concatenation
+    # (`PANFROST_IOCTL(SUBMIT, submit, ...)` expands to reference
+    # `panfrost_ioctl_submit`); the function name LITERALLY never
+    # appears in the source so the pointer-ref guard misses it.
+    # Real-target test on Linux 6.18 surfaced this on
+    # panfrost_ioctl_submit. Functions whose names match common
+    # vtable / callback naming conventions are highly likely to be
+    # macro-registered handlers — defer to LLM Stage D rather than
+    # claim dead-code.
+    if _looks_like_macro_registered_handler(finding_fn):
+        return False
     return True
+
+
+# Naming-convention suffixes/infixes for functions that are commonly
+# registered via macros and would have their name produced by token
+# concatenation (so the literal name never appears in source).
+# Conservative — only suppresses dead-code claim, doesn't change
+# other axes.
+_MACRO_REGISTERED_SUFFIXES: Tuple[str, ...] = (
+    "_ioctl_submit", "_ioctl", "_ioctl_",
+    "_show", "_store",
+    "_open", "_release", "_read", "_write",
+    "_init", "_exit",
+    "_probe", "_remove",
+    "_suspend", "_resume",
+    "_attach", "_detach",
+    "_get", "_set",
+    "_alloc", "_free",
+    "_create", "_destroy",
+    "_handler", "_callback", "_op", "_ops",
+)
+
+
+def _looks_like_macro_registered_handler(fn_name: str) -> bool:
+    """Heuristic: does the function name end with a suffix that
+    suggests it's registered via a macro / ops vtable?
+
+    Surfaced by real-target test on Linux 6.18: `panfrost_ioctl_submit`
+    has its name produced by `panfrost_ioctl_##func` macro
+    expansion — pointer-ref guard misses it. This is the common
+    case across the kernel subsystem driver vocabulary.
+    """
+    if not fn_name:
+        return False
+    for suffix in _MACRO_REGISTERED_SUFFIXES:
+        if fn_name.endswith(suffix):
+            return True
+    # Also infixes — common shapes like `*_ioctl_*`.
+    for infix in ("_ioctl_", "_callback_", "_handler_"):
+        if infix in fn_name:
+            return True
+    return False
 
 
 def _function_referenced_as_pointer(
@@ -958,3 +1015,136 @@ def _fortified_dest_is_variable_size(finding: Finding) -> bool:
         if assign_pat.search(lines[i]):
             return True
     return False
+
+
+# =====================================================================
+# Axis 8 — validation-after-overflow (downstream-check suppressor)
+# =====================================================================
+
+
+# Rule prefixes where a downstream size/range check meaningfully
+# suppresses the finding. Size-arithmetic CWEs (uncontrolled-alloc-
+# size, unbounded-write) are correctly suppressed when a check on
+# the size variable runs between bug-site and use-site, with an
+# early-exit. NOT applicable to null-deref / UAF / double-free.
+_DOWNSTREAM_CHECK_RULE_PREFIXES: Tuple[str, ...] = (
+    "cpp/uncontrolled-",       # uncontrolled-allocation-size etc.
+    "cpp/unbounded-write",
+    "c/uncontrolled-",
+    "c/unbounded-write",
+)
+
+
+def _downstream_check_suppresses_finding(finding: Finding) -> bool:
+    """Return True iff axis-8 (validation-after-overflow) suppresses
+    the finding.
+
+    Pattern: the sink-line assigns a variable; a downstream
+    ``if (...var...)`` with an early-exit (return/goto/continue/break)
+    runs before any consumer of the var. The classic shape:
+
+        int size = nex * sizeof(xfs_bmbt_rec_t);
+        if (unlikely(size < 0 || size > MAX_OK)) return -ERR;
+        memcpy(buf, src, size);
+
+    Without this axis the verdict policy emits UNCERTAIN; with it
+    the downstream guard is recognized and the verdict goes
+    NOT_EXPLOITABLE (the surface arithmetic-overflow shape is
+    real but mitigated by the in-function check).
+
+    Real-target audit motivated this axis: 3 of 10 audited Linux
+    int-overflow findings (xfs_inode_fork.c, hid-core.c, r100.c)
+    have a downstream guard that source_intel was missing.
+    """
+    rid = finding.rule_id or ""
+    if not any(rid.startswith(p) for p in _DOWNSTREAM_CHECK_RULE_PREFIXES):
+        return False
+
+    var_name = _extract_local_var_from_snippet(finding.sink.snippet)
+    if not var_name:
+        return False
+
+    sink_path = finding.sink.file_path or ""
+    sink_line = finding.sink.line or 0
+    if not sink_path or not sink_line:
+        return False
+
+    sink_path_abs = sink_path
+    if not Path(sink_path).is_absolute():
+        sink_path_abs = str((_DEFAULT_REPO_ROOT / sink_path).resolve())
+
+    try:
+        with open(sink_path_abs, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return False
+
+    # Scan forward up to 30 lines (typical alloc-then-validate-then-use
+    # window). For each line containing `if (... var ...)`, look for an
+    # early-exit within the next 5 lines. Require a relational
+    # operator (`<`, `>`, `<=`, `>=`) on the same line — pure
+    # `if (!var)` / `if (var == NULL)` is an allocator-success
+    # check, not a size-overflow validation, and is handled by
+    # axis 3 / axis 5 not by this axis.
+    # Require the relational comparison to be on `var` itself, not
+    # on a field of var (`var->field == 0` is checking the *value*
+    # at the pointer, not the pointer's safety). Real-target test on
+    # s390/kvm/interrupt.c:3337 surfaced this — axis-8 was wrongly
+    # suppressing because `if (gaite->count == 0)` matched the
+    # var-in-if regex.
+    var_rel_re = re.compile(
+        r"\b" + re.escape(var_name) + r"\s*(?:[<>]=?|==|!=)"
+    )
+    var_in_if = re.compile(
+        r"\bif\s*\(.*?" + var_rel_re.pattern,
+    )
+    has_relational = re.compile(r"[<>](?!=)|[<>]=")
+    early_exit = re.compile(r"\b(?:return\b|continue\b|break\b|goto\b)")
+
+    start = sink_line  # next line after sink (0-indexed; sink_line itself excluded)
+    end = min(sink_line + 30, len(lines))
+    for i in range(start, end):
+        if not var_in_if.search(lines[i]):
+            continue
+        # Require a relational comparison on this line. Pure-NULL
+        # checks fall through to other axes.
+        if not has_relational.search(lines[i]):
+            continue
+        # Look for early-exit INSIDE the if-body. Track brace depth
+        # from the if-line. Stop scanning once the if-body closes —
+        # a `return 0;` at function end is NOT an early-exit out of
+        # the if. The xfs canonical case has 7 lines of warning
+        # calls between `if (...)` and `return`, so use a generous
+        # 20-line ceiling on the search.
+        depth = 0
+        seen_open_brace = False
+        max_scan = min(i + 20, len(lines))
+        for j in range(i, max_scan):
+            line = lines[j]
+            # Strip C-style comments before early-exit scanning —
+            # otherwise `/* no return */` falsely matches `return`.
+            stripped = _COMMENT_STRIP_RE.sub("", line)
+            stripped = _LINE_COMMENT_STRIP_RE.sub("", stripped)
+            # Single-line if shape: `if (cond) return -1;` — the
+            # early-exit is on the same line, no `{` ever appears.
+            # Match it before brace tracking advances.
+            if early_exit.search(stripped):
+                return True
+            # Track brace depth ignoring chars inside strings/chars is
+            # not done — depth may be slightly wrong on lines with
+            # string literals containing braces. Acceptable for the
+            # bug-class we're catching (kernel int-overflow guards
+            # don't contain string-literal braces in practice).
+            for ch in stripped:
+                if ch == "{":
+                    depth += 1
+                    seen_open_brace = True
+                elif ch == "}":
+                    depth -= 1
+            if seen_open_brace and depth <= 0:
+                break
+    return False
+
+
+_COMMENT_STRIP_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_STRIP_RE = re.compile(r"//.*$", re.MULTILINE)
