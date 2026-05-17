@@ -136,6 +136,30 @@ class AbortEvidence:
 
 
 @dataclass(frozen=True)
+class PairedFreeEvidence:
+    """An allocator call site whose return value IS subsequently
+    freed within the same function (via matching free_fn family).
+
+    INFORMATIONAL only — emitted at the ALLOC site location. Stage
+    D LLM consumer reads as "this allocation is freed in-function".
+
+    Useful negative signal for CodeQL cpp/memory-leak findings —
+    when the same alloc-site IS paired, the leak claim is suspect
+    (but not definitively wrong — error paths may still leak).
+
+    Why not verdict-active for memory-leak suppression: cocci
+    pairing means "we found A free path", not "every path frees
+    correctly". CFG-level all-paths analysis is out of scope for
+    a cocci-only tool.
+    """
+
+    allocator: str  # kmalloc / kzalloc / vmalloc / ...
+    free_fn: str    # kfree / vfree / kvfree / free
+    location: Tuple[str, int]  # at the alloc site
+    enclosing_function: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class DoubleFreeEvidence:
     """A single observation of a `kfree(X); ... kfree(X);` shape
     without intervening reassignment to NULL or a new allocation.
@@ -411,6 +435,11 @@ class SourceIntelResult:
     #: reassignment). Verdict-active for cpp/double-free.
     double_frees: Tuple[DoubleFreeEvidence, ...] = ()
 
+    #: Axis 3 expansion: alloc sites whose return is freed in-
+    #: function (`local = alloc(...); ... free(local);` shape).
+    #: Informational — feeds Stage D LLM as memory-leak corroboration.
+    paired_frees: Tuple[PairedFreeEvidence, ...] = ()
+
     #: Axis 6 consumer: build-hardening flags observed in the target's
     #: build configuration. Populated from core.build.build_flags when
     #: signal exists; otherwise default BuildFlagsContext() (all None,
@@ -627,6 +656,7 @@ def analyze(
     boundary_observations: List[BoundaryEvidence] = []
     lsm_observations: List[LsmEvidence] = []
     double_free_observations: List[DoubleFreeEvidence] = []
+    paired_free_observations: List[PairedFreeEvidence] = []
 
     # spatch invocation per axis. ``no_includes=True`` matches the
     # existing PR-3 scan + PR-4 prereqs untrusted-target posture;
@@ -679,6 +709,9 @@ def analyze(
                 double_free_observations.extend(
                     _parse_match_to_double_free(match)
                 )
+                paired_free_observations.extend(
+                    _parse_match_to_paired_free(match)
+                )
 
     # Project-specific alias discovery: walk target headers, classify
     # `#define MACRO __attribute__((...))` patterns by family, count
@@ -721,6 +754,7 @@ def analyze(
         boundary_crossings=tuple(boundary_observations),
         lsm_hooks=tuple(lsm_observations),
         double_frees=tuple(double_free_observations),
+        paired_frees=tuple(paired_free_observations),
         build_flags=extract_flags(target),
     )
 
@@ -1100,6 +1134,38 @@ def _parse_match_to_capability(match: Any) -> List[CapabilityEvidence]:
         grade=GRADE_SAME_FUNCTION,
         enclosing_function=enclosing_fn,
         conditional_on=cond,
+    )]
+
+
+def _parse_match_to_paired_free(
+    match: Any,
+) -> List[PairedFreeEvidence]:
+    """Convert a cocci SpatchMatch from paired_free.cocci into a
+    PairedFreeEvidence record.
+
+    Cocci emits ``alloc_paired:<allocator>:<free_fn>`` at the
+    alloc-site line.
+    """
+    msg = (getattr(match, "message", "") or "").strip()
+    if not msg.startswith("alloc_paired:"):
+        return []
+    parts = msg.split(":", 2)
+    if len(parts) < 3:
+        return []
+    _label, allocator, free_fn = parts
+    allocator = allocator.strip()
+    free_fn = free_fn.strip()
+    if not allocator or not free_fn:
+        return []
+    file_path = getattr(match, "file", "")
+    line_no = int(getattr(match, "line", 0))
+    enclosing_fn = (
+        _enclosing_function(file_path, line_no) if file_path else None
+    )
+    return [PairedFreeEvidence(
+        allocator=allocator, free_fn=free_fn,
+        location=(file_path, line_no),
+        enclosing_function=enclosing_fn,
     )]
 
 
