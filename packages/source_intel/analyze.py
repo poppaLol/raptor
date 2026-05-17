@@ -105,6 +105,14 @@ class AllocationEvidence:
     target_field: Optional[str] = None  # struct field name for "field" shape
     enclosing_function: Optional[str] = None
     conditional_on: Optional[str] = None
+    #: Axis-3 size-source classification (Tier 2.3). One of:
+    #:   "literal" — kmalloc(8, ...)
+    #:   "sizeof" — kmalloc(sizeof(struct foo), ...)
+    #:   "variable" — kmalloc(n, ...)
+    #:   "multiplied" — kmalloc(n * sizeof(*p), ...)
+    #:   "user_controlled" — multiplied with user-input-shaped var
+    #:   None — not classified / parser failed
+    size_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +133,26 @@ class AbortEvidence:
     grade: str  # one of ``ALL_GRADES``
     enclosing_function: Optional[str] = None  # function name when known
     conditional_on: Optional[str] = None  # surrounding #ifdef condition
+
+
+@dataclass(frozen=True)
+class DoubleFreeEvidence:
+    """A single observation of a `kfree(X); ... kfree(X);` shape
+    without intervening reassignment to NULL or a new allocation.
+
+    Cocci emits TWO records per match: ``role="first"`` at the
+    first kfree, ``role="second"`` at the second. Both have the
+    same enclosing function (verified by Python).
+
+    Verdict-active: when a CodeQL cpp/double-free finding sits at
+    either kfree site, this is direct structural evidence → fire
+    EXPLOITABLE.
+    """
+
+    role: str  # "first" | "second"
+    free_fn: str  # kfree / kvfree / vfree / free
+    location: Tuple[str, int]
+    enclosing_function: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -378,6 +406,11 @@ class SourceIntelResult:
     #: Informational; indicates policy-enforcement points.
     lsm_hooks: Tuple[LsmEvidence, ...] = ()
 
+    #: Axis 3 expansion: double-free call sites
+    #: (`kfree(X); ... kfree(X);` shape with no intervening
+    #: reassignment). Verdict-active for cpp/double-free.
+    double_frees: Tuple[DoubleFreeEvidence, ...] = ()
+
     #: Axis 6 consumer: build-hardening flags observed in the target's
     #: build configuration. Populated from core.build.build_flags when
     #: signal exists; otherwise default BuildFlagsContext() (all None,
@@ -593,6 +626,7 @@ def analyze(
     null_guard_observations: List[NullGuardEvidence] = []
     boundary_observations: List[BoundaryEvidence] = []
     lsm_observations: List[LsmEvidence] = []
+    double_free_observations: List[DoubleFreeEvidence] = []
 
     # spatch invocation per axis. ``no_includes=True`` matches the
     # existing PR-3 scan + PR-4 prereqs untrusted-target posture;
@@ -642,6 +676,9 @@ def analyze(
                 lsm_observations.extend(
                     _parse_match_to_lsm(match)
                 )
+                double_free_observations.extend(
+                    _parse_match_to_double_free(match)
+                )
 
     # Project-specific alias discovery: walk target headers, classify
     # `#define MACRO __attribute__((...))` patterns by family, count
@@ -683,6 +720,7 @@ def analyze(
         null_guards=tuple(null_guard_observations),
         boundary_crossings=tuple(boundary_observations),
         lsm_hooks=tuple(lsm_observations),
+        double_frees=tuple(double_free_observations),
         build_flags=extract_flags(target),
     )
 
@@ -750,6 +788,8 @@ def _parse_match_to_allocation(match: Any) -> List[AllocationEvidence]:
     except ImportError:
         cond = None
 
+    size_source = _classify_size_source(file_path, line_no, allocator)
+
     return [AllocationEvidence(
         allocator=allocator,
         location=(file_path, line_no),
@@ -757,7 +797,148 @@ def _parse_match_to_allocation(match: Any) -> List[AllocationEvidence]:
         target_field=target_field,
         enclosing_function=enclosing_fn,
         conditional_on=cond,
+        size_source=size_source,
     )]
+
+
+# Heuristic name patterns suggesting a variable carries user input.
+# Conservative — operators routinely use these names for kernel-side
+# computations too, but in the presence of a CWE-190/CWE-122 finding
+# the "user_controlled" label is a useful Stage D LLM hint.
+_USER_INPUT_VAR_NAMES: FrozenSet[str] = frozenset({
+    "n", "len", "length", "size", "count", "nr", "num",
+    "user_size", "user_len", "input_len", "input_size",
+    "msg_len", "data_len", "payload_len", "buf_len",
+    "nbytes", "nelems", "cnt",
+})
+
+
+def _classify_size_source(
+    file_path: str,
+    line_no: int,
+    allocator: str,
+) -> Optional[str]:
+    """Read the source line and classify the first argument shape of
+    the allocator call.
+
+    Categories:
+      * ``literal`` — `kmalloc(8, ...)` — digit literal
+      * ``sizeof`` — `kmalloc(sizeof(struct foo), ...)` — sizeof-only
+      * ``variable`` — `kmalloc(n, ...)` — single identifier
+      * ``multiplied`` — `kmalloc(n * sizeof(T), ...)` — multiplication
+      * ``user_controlled`` — multiplied with a var name matching the
+        user-input name set (``n``, ``len``, ``count``, ``nbytes``…)
+
+    Returns None when:
+      * the file can't be read
+      * the alloc call isn't found at the expected line
+      * the first arg doesn't match any pattern
+    """
+    if not file_path or not line_no:
+        return None
+    try:
+        with open(file_path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    if line_no < 1 or line_no > len(lines):
+        return None
+    src_line = lines[line_no - 1]
+
+    # Find `<allocator>(` and extract through matching `)` accounting
+    # for nested parens (the first arg might contain sizeof(T) etc.).
+    alloc_pat = re.compile(r"\b" + re.escape(allocator) + r"\s*\(")
+    m = alloc_pat.search(src_line)
+    if not m:
+        return None
+    start = m.end()  # position just past the opening (
+    depth = 1
+    arg_end = None
+    for i in range(start, len(src_line)):
+        ch = src_line[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                arg_end = i
+                break
+        elif ch == "," and depth == 1:
+            # First arg ends at this comma.
+            arg_end = i
+            break
+    if arg_end is None:
+        return None
+    first_arg = src_line[start:arg_end].strip()
+    if not first_arg:
+        return None
+
+    # Classify.
+    return _classify_arg_shape(first_arg)
+
+
+_DIGIT_RE = re.compile(r"^-?\d+[uUlL]*$|^0[xX][0-9a-fA-F]+[uUlL]*$")
+_SIZEOF_RE = re.compile(r"^\s*sizeof\s*\(")
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*$")
+_MUL_RE = re.compile(r"\*")
+
+
+def _is_pure_sizeof(arg: str) -> bool:
+    """Return True iff ``arg`` is exactly `sizeof(...)` with balanced
+    parens and nothing after. `sizeof(*p)` qualifies (the `*` is
+    inside the parens — dereference, not multiplication).
+    """
+    arg = arg.strip()
+    if not arg.startswith("sizeof"):
+        return False
+    rest = arg[len("sizeof"):].lstrip()
+    if not rest.startswith("("):
+        return False
+    # Walk balancing parens.
+    depth = 0
+    for i, ch in enumerate(rest):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                # rest[i+1:] must be empty (no trailing arithmetic).
+                return rest[i+1:].strip() == ""
+    return False
+
+
+def _classify_arg_shape(arg: str) -> Optional[str]:
+    """Classify a single allocator argument string."""
+    arg = arg.strip()
+    if not arg:
+        return None
+    if _DIGIT_RE.match(arg):
+        return "literal"
+    # Pure sizeof(...) with no top-level multiplication. Check by
+    # verifying the entire arg is just `sizeof(...)` — i.e., no `*`
+    # outside the sizeof parens. `*` inside the parens (e.g.
+    # `sizeof(*p)`) is dereference syntax, NOT multiplication.
+    if _is_pure_sizeof(arg):
+        return "sizeof"
+    # Multiplication present — could be sizeof*var or var*sizeof.
+    if "*" in arg:
+        # Look for a known user-input var name in the operands.
+        operands = [op.strip() for op in arg.split("*")]
+        for op in operands:
+            # Strip sizeof(...) wrappers.
+            if op.startswith("sizeof"):
+                continue
+            # Strip parens.
+            naked = op.strip("()").strip()
+            if naked in _USER_INPUT_VAR_NAMES:
+                return "user_controlled"
+        return "multiplied"
+    # Single identifier.
+    if _IDENT_RE.match(arg):
+        if arg in _USER_INPUT_VAR_NAMES:
+            return "user_controlled"
+        return "variable"
+    return None
 
 
 def _parse_match_to_abort(match: Any) -> List[AbortEvidence]:
@@ -919,6 +1100,39 @@ def _parse_match_to_capability(match: Any) -> List[CapabilityEvidence]:
         grade=GRADE_SAME_FUNCTION,
         enclosing_function=enclosing_fn,
         conditional_on=cond,
+    )]
+
+
+def _parse_match_to_double_free(
+    match: Any,
+) -> List[DoubleFreeEvidence]:
+    """Convert a cocci SpatchMatch from double_free.cocci into a
+    DoubleFreeEvidence record.
+
+    Cocci emits messages of the form
+    ``double_free:<role>:<free_fn>`` where role is "first" or
+    "second".
+    """
+    msg = (getattr(match, "message", "") or "").strip()
+    if not msg.startswith("double_free:"):
+        return []
+    parts = msg.split(":", 2)
+    if len(parts) < 3:
+        return []
+    _label, role, free_fn = parts
+    role = role.strip()
+    free_fn = free_fn.strip()
+    if role not in ("first", "second") or not free_fn:
+        return []
+    file_path = getattr(match, "file", "")
+    line_no = int(getattr(match, "line", 0))
+    enclosing_fn = (
+        _enclosing_function(file_path, line_no) if file_path else None
+    )
+    return [DoubleFreeEvidence(
+        role=role, free_fn=free_fn,
+        location=(file_path, line_no),
+        enclosing_function=enclosing_fn,
     )]
 
 

@@ -49,6 +49,7 @@ from packages.source_intel.analyze import (
     AllocationEvidence,
     AttributeEvidence,
     CapabilityEvidence,
+    DoubleFreeEvidence,
     HazardEvidence,
     SourceIntelResult,
     analyze,
@@ -268,6 +269,9 @@ class SourceIntelValidator:
             return ValidatorVerdict.EXPLOITABLE
 
         if _hazard_supports_finding(finding, result):
+            return ValidatorVerdict.EXPLOITABLE
+
+        if _double_free_supports_finding(finding, result):
             return ValidatorVerdict.EXPLOITABLE
 
         snippet = (
@@ -1555,3 +1559,52 @@ def _extract_return_values(body_lines: list) -> list:
             val = re.sub(r"\s+", " ", m.group(1).strip())
             values.append(val)
     return values
+
+
+# =====================================================================
+# Axis 3 expansion — double-free verdict
+# =====================================================================
+
+
+def _double_free_supports_finding(
+    finding: Finding,
+    result: SourceIntelResult,
+) -> bool:
+    """Return True iff axis-3 double-free evidence directly supports
+    EXPLOITABLE on this finding.
+
+    Required:
+      * rule_id is `cpp/double-free` (or c/ variant)
+      * a double-free evidence record sits at (or within ±3 lines
+        of) the finding's source OR sink line.
+
+    Both ROLE values count — finding may point to either the first
+    or second kfree (CodeQL typically reports the second).
+    """
+    rid = finding.rule_id or ""
+    if not (rid.startswith("cpp/double-free")
+            or rid.startswith("c/double-free")):
+        return False
+    if not result.double_frees:
+        return False
+
+    sink_path = finding.sink.file_path or ""
+    sink_line = finding.sink.line or 0
+    src_line = finding.source.line or 0
+    if not sink_path:
+        return False
+
+    sink_path_abs = sink_path
+    if not Path(sink_path).is_absolute():
+        sink_path_abs = str((_DEFAULT_REPO_ROOT / sink_path).resolve())
+
+    for df in result.double_frees:
+        df_path, df_line = df.location
+        if df_path != sink_path_abs:
+            continue
+        for target_line in (sink_line, src_line):
+            if not target_line:
+                continue
+            if abs(df_line - target_line) <= 3:
+                return True
+    return False
