@@ -248,6 +248,7 @@ def find_manifests(
     repo: Path,
     max_depth: int = DEFAULT_MAX_DEPTH,
     extra_excludes: Optional[Set[str]] = None,
+    include_test_paths: bool = False,
 ) -> List[Manifest]:
     """Walk repo finding manifests + lockfiles.
 
@@ -255,6 +256,15 @@ def find_manifests(
         repo: project root (absolute or relative; resolved before walking).
         max_depth: soft cap on directory depth from repo root.
         extra_excludes: directory names to skip in addition to the default.
+        include_test_paths: if True, include manifests under ``tests/`` /
+            ``__tests__/`` / etc. Default False because real-world test
+            fixtures regularly contain synthetic stress-test manifests
+            (e.g. Semgrep ships ``cli/tests/performance/targets_perf_sca/
+            100k/Gemfile.lock`` with 100,000 fake gem names) which SCA
+            would otherwise treat as real dependencies and query the
+            upstream registry for. The May 2026 200-project sweep
+            against Semgrep surfaced 23,000+ bogus rubygems.org queries
+            for ``package0`` through ``package99999``.
 
     Returns:
         List of Manifest, one per discovered file. Order is deterministic
@@ -272,9 +282,19 @@ def find_manifests(
     excludes = EXCLUDED_DIR_NAMES | (extra_excludes or set())
     found: List[Manifest] = []
 
+    # Test-path filtering is deferred until after classification so a
+    # rejected path doesn't pay the parse-classification cost twice.
+    # Imported lazily to avoid a circular dep at module-import time.
+    if not include_test_paths:
+        from ._test_paths import is_test_path
+    else:
+        is_test_path = None
+
     for path in _walk(repo, max_depth=max_depth, excludes=excludes):
         eco = _classify(path)
         if eco is None:
+            continue
+        if is_test_path is not None and is_test_path(path, repo):
             continue
         is_lock = (path.name in LOCKFILE_NAMES
                    or _is_gemfile_lock_variant(path.name))
