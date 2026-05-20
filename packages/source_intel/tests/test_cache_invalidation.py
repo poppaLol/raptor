@@ -263,3 +263,61 @@ def test_clear_all_safe_when_inject_module_unavailable(tmp_path):
         clear_all_source_intel_caches()  # must not raise
 
     assert not _INVENTORY_BY_TARGET  # inventory clear still ran
+
+
+# =====================================================================
+# Concurrency — gap #5
+# =====================================================================
+
+def test_concurrent_register_lookup_no_raise(tmp_path):
+    """Hammer ``_register_inventory`` and ``_lookup_cached_inventory``
+    from multiple threads. The status doc flagged a "likely benign"
+    race; the locks added in gap #5 should make it formally benign.
+    Any unhandled exception, dict-mutated-during-iteration, or torn
+    read would surface as a failed thread or a None vs sentinel
+    inversion. None of the threads should raise."""
+    import threading
+
+    _make_c_file(tmp_path, "a.c")
+    sentinel = SimpleNamespace(label="inv-v1")
+    fp = str(tmp_path / "a.c")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def writer():
+        try:
+            while not stop.is_set():
+                _register_inventory(tmp_path, sentinel)
+        except BaseException as e:  # noqa: BLE001
+            with errors_lock:
+                errors.append(e)
+
+    def reader():
+        try:
+            while not stop.is_set():
+                inv, _ = _lookup_cached_inventory(fp)
+                # During the race window, inv may be sentinel or None
+                # (if the entry was popped due to stale signature in a
+                # concurrent step). Both are valid; what's NOT valid is
+                # a partially-constructed/corrupt object. Sanity-check
+                # the type.
+                assert inv is None or inv is sentinel
+        except BaseException as e:  # noqa: BLE001
+            with errors_lock:
+                errors.append(e)
+
+    threads = (
+        [threading.Thread(target=writer) for _ in range(3)]
+        + [threading.Thread(target=reader) for _ in range(5)]
+    )
+    for t in threads:
+        t.start()
+    # Short burst is enough — even ~10k iter pairs per thread
+    # surface a torn dict reliably under the GIL on a multi-core box.
+    time.sleep(0.3)
+    stop.set()
+    for t in threads:
+        t.join(timeout=5.0)
+        assert not t.is_alive(), "thread didn't exit — possible deadlock"
+    assert errors == [], f"thread(s) raised: {errors}"

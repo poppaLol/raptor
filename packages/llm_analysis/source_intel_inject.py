@@ -39,6 +39,7 @@ findings in one repo share the spatch result.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -76,7 +77,14 @@ logger = logging.getLogger(__name__)
 # — lookups re-stamp the target and drop the entry if it shifted,
 # so two ``/agentic`` runs on the same target with content edits in
 # between trigger a re-analyze rather than serve stale evidence.
+#
+# Thread-safety: ``_SI_LOCK`` (RLock) guards the dict ops. Same
+# pattern as ``_INVENTORY_LOCK`` in ``packages.source_intel.analyze``
+# — the lock is held only around the dict reads/writes, never
+# during the filesystem-walking signature compute or the call to
+# ``_analyze`` (which can take minutes for a kernel-sized target).
 _SI_RESULT_CACHE: Dict[str, Tuple[str, Optional[Any]]] = {}
+_SI_LOCK = threading.RLock()
 
 def prepare_source_intel(repo_path: Path) -> None:
     """Pre-seed the source_intel result cache for ``repo_path``.
@@ -110,15 +118,17 @@ def prepare_source_intel(repo_path: Path) -> None:
         return
     from packages.source_intel.cache import compute_target_signature
     sig = compute_target_signature(repo_path)
-    cached = _SI_RESULT_CACHE.get(key)
-    if cached is not None and cached[0] == sig:
-        return  # already attempted on this exact tree state (success or failure)
+    with _SI_LOCK:
+        cached = _SI_RESULT_CACHE.get(key)
+        if cached is not None and cached[0] == sig:
+            return  # already attempted on this exact tree state
     if _analyze is None:
         logger.debug(
             "prepare_source_intel: packages.source_intel not importable; "
             "skipping injection wiring",
         )
-        _SI_RESULT_CACHE[key] = (sig, None)
+        with _SI_LOCK:
+            _SI_RESULT_CACHE[key] = (sig, None)
         return
     try:
         result = _analyze(repo_path)
@@ -128,9 +138,11 @@ def prepare_source_intel(repo_path: Path) -> None:
             "Stage D will run without source_intel evidence",
             repo_path, e,
         )
-        _SI_RESULT_CACHE[key] = (sig, None)
+        with _SI_LOCK:
+            _SI_RESULT_CACHE[key] = (sig, None)
         return
-    _SI_RESULT_CACHE[key] = (sig, result)
+    with _SI_LOCK:
+        _SI_RESULT_CACHE[key] = (sig, result)
 
 
 def evidence_blocks_for_finding(
@@ -170,17 +182,22 @@ def evidence_blocks_for_finding(
     except (OSError, ValueError):
         return ()
 
-    entry = _SI_RESULT_CACHE.get(repo_key)
+    with _SI_LOCK:
+        entry = _SI_RESULT_CACHE.get(repo_key)
     if entry is None:  # cache miss — orchestrator never called prepare_source_intel
         return ()
-    # Validate freshness. If the target's signature has shifted
-    # since prepare ran, treat as a miss + drop the stale entry —
-    # safer than serving evidence built from an out-of-date tree.
+    # Validate freshness outside the lock — signature compute walks
+    # the filesystem and would serialise unrelated lookups.
     from packages.source_intel.cache import compute_target_signature
     cached_sig, result = entry
     current_sig = compute_target_signature(Path(repo_key))
     if cached_sig != current_sig:
-        _SI_RESULT_CACHE.pop(repo_key, None)
+        # Re-check under the lock that we're popping the same
+        # entry we read; a concurrent prepare may have refreshed it.
+        with _SI_LOCK:
+            current_entry = _SI_RESULT_CACHE.get(repo_key)
+            if current_entry is not None and current_entry[0] == cached_sig:
+                _SI_RESULT_CACHE.pop(repo_key, None)
         return ()
     if result is None:  # cached failure
         return ()
@@ -236,7 +253,8 @@ def clear_si_result_cache() -> None:
     same-path/content-changed case; this is the extra lever for
     callers that don't want to rely on the implicit path.
     """
-    _SI_RESULT_CACHE.clear()
+    with _SI_LOCK:
+        _SI_RESULT_CACHE.clear()
 
 
 # Back-compat alias. Existing test code imports this name; the

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
@@ -1508,7 +1509,18 @@ _C_KEYWORDS: FrozenSet[str] = frozenset({
 # same process. Two ``/agentic`` runs on the same path see a stale
 # inventory only if the source hasn't changed (correct), and see a
 # fresh build whenever any file's mtime/size or build-marker shifts.
+#
+# Thread-safety: the dict is guarded by ``_INVENTORY_LOCK`` (an
+# ``RLock`` so a callback firing inside a lookup that triggers
+# another lookup doesn't self-deadlock). The CPython GIL would in
+# practice make dict reads + writes atomic at the bytecode level,
+# but the multi-step lookup (find best_target → recompute signature
+# → pop-or-return) reads the dict twice and would race with a
+# concurrent register or another lookup's pop. The lock is taken
+# only around the dict ops themselves, not while computing the
+# signature (which walks the filesystem and could take ms).
 _INVENTORY_BY_TARGET: Dict[str, Tuple[str, Any]] = {}
+_INVENTORY_LOCK = threading.RLock()
 
 
 def _register_inventory(target: Path, inventory: Any) -> None:
@@ -1522,7 +1534,8 @@ def _register_inventory(target: Path, inventory: Any) -> None:
         sig = compute_target_signature(target)
     except (OSError, ValueError):  # unresolvable path → skip cache
         return
-    _INVENTORY_BY_TARGET[resolved] = (sig, inventory)
+    with _INVENTORY_LOCK:
+        _INVENTORY_BY_TARGET[resolved] = (sig, inventory)
 
 
 def clear_inventory_cache() -> None:
@@ -1534,7 +1547,8 @@ def clear_inventory_cache() -> None:
     same-path/content-changed cases — this is the explicit reset
     for callers that don't want to rely on the implicit path.
     """
-    _INVENTORY_BY_TARGET.clear()
+    with _INVENTORY_LOCK:
+        _INVENTORY_BY_TARGET.clear()
 
 
 def _maybe_register_inventory(target: Path) -> None:
@@ -1581,36 +1595,47 @@ def _lookup_cached_inventory(file_path: str) -> Tuple[Optional[Any], Optional[st
     and treated as a miss. This is the production invalidation
     path for cross-run reuse in a single process.
     """
-    if not _INVENTORY_BY_TARGET:
-        return None, None
-    try:
-        fp = Path(file_path).resolve()
-    except (OSError, ValueError):
-        return None, None
-    best_target: Optional[str] = None
-    best_depth = -1
-    fp_str = str(fp)
-    for target in _INVENTORY_BY_TARGET:
-        # File is under target iff the resolved file path string
-        # starts with target + os.sep (or equals target for
-        # single-file targets — unusual but supported).
-        if fp_str == target or fp_str.startswith(target + os.sep):
-            depth = target.count(os.sep)
-            if depth > best_depth:
-                best_target = target
-                best_depth = depth
-    if best_target is None:
-        return None, None
+    # Snapshot the keys + best entry inside the lock. Holding the
+    # lock for the filesystem-walking signature compute would
+    # serialise all concurrent lookups on disk I/O latency — the
+    # walk runs unlocked, and a final lock-protected re-check
+    # decides whether to pop or return.
+    with _INVENTORY_LOCK:
+        if not _INVENTORY_BY_TARGET:
+            return None, None
+        try:
+            fp = Path(file_path).resolve()
+        except (OSError, ValueError):
+            return None, None
+        best_target: Optional[str] = None
+        best_depth = -1
+        fp_str = str(fp)
+        for target in _INVENTORY_BY_TARGET:
+            # File is under target iff the resolved file path string
+            # starts with target + os.sep (or equals target for
+            # single-file targets — unusual but supported).
+            if fp_str == target or fp_str.startswith(target + os.sep):
+                depth = target.count(os.sep)
+                if depth > best_depth:
+                    best_target = target
+                    best_depth = depth
+        if best_target is None:
+            return None, None
+        stored_sig, inventory = _INVENTORY_BY_TARGET[best_target]
 
-    # Validate freshness — drop and miss if the target has changed.
+    # Validate freshness outside the lock — signature compute walks
+    # the filesystem and would otherwise serialise concurrent
+    # lookups for unrelated targets.
     from packages.source_intel.cache import compute_target_signature
-    stored_sig, inventory = _INVENTORY_BY_TARGET[best_target]
     current_sig = compute_target_signature(Path(best_target))
     if stored_sig != current_sig:
-        # Pop the stale entry so this code path doesn't repeat the
-        # signature compute on every subsequent lookup for the same
-        # target. Next lookup will register-or-rebuild via analyze.
-        _INVENTORY_BY_TARGET.pop(best_target, None)
+        # Re-check under the lock that the entry we're popping is
+        # the same one we read above. A concurrent register may
+        # have refreshed it with a current signature in the gap.
+        with _INVENTORY_LOCK:
+            current_entry = _INVENTORY_BY_TARGET.get(best_target)
+            if current_entry is not None and current_entry[0] == stored_sig:
+                _INVENTORY_BY_TARGET.pop(best_target, None)
         return None, None
     return inventory, best_target
 
