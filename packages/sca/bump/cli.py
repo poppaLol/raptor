@@ -83,12 +83,36 @@ def main(argv: Sequence[str]) -> int:
              "(default: read GITHUB_TOKEN env var)",
     )
     parser.add_argument(
+        "--trust-repo", action="store_true",
+        help="treat the target as trusted; opt out of safety gates "
+             "that refuse to operate on untrusted content. Mirrors "
+             "the same flag on ``raptor-sca`` (scan) and "
+             "``raptor-sca fix --harden`` for consistent operator "
+             "experience across subcommands.",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="count", default=0,
     )
     args = parser.parse_args(argv)
 
     from ..cli import _configure_logging
     _configure_logging(args.verbose)
+
+    if args.trust_repo:
+        # Same wiring shape as ``raptor-sca fix --harden`` and the
+        # scan path. Untrusted-target safety gates downstream of
+        # ``cc_trust.is_trust_overridden()`` (e.g. the ``cc_dispatch``
+        # block in agentic enrichment, target-pollution guards in
+        # parsers) honour this opt-in. ImportError on cc_trust is
+        # an env mismatch, not a fatal error — bump still works
+        # without the override; the operator just gets the default
+        # untrusted treatment.
+        try:
+            from core.security.cc_trust import set_trust_override
+            set_trust_override(True)
+        except ImportError:
+            logger.debug("raptor-sca bump: cc_trust unavailable; "
+                          "--trust-repo had no effect")
 
     target = args.target.resolve()
     if not target.exists():
