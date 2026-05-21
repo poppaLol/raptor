@@ -810,10 +810,22 @@ def _run_self_test(
               file=sys.stderr)
         return 4
 
-    import subprocess
     import tempfile
+    from core.sandbox.context import run_untrusted
     tmp_root = Path(tempfile.mkdtemp(prefix="raptor-sca-self-test-"))
     worktree = tmp_root / "wt"
+    # The target's ``.git/config`` is attacker-controllable on an
+    # untrusted clone — git evaluates ``core.fsmonitor`` /
+    # ``core.sshCommand`` / ``core.gitProxy`` etc. at startup and
+    # will exec arbitrary commands per their value. Even though
+    # ``--self-test`` is mostly used on the operator's own tree in
+    # CI, we route every git invocation through ``run_untrusted``
+    # so a malicious ``.git/config`` can only escalate to "code
+    # exec inside the sandbox" (block_network, restrict_reads,
+    # fake_home, Landlock writes limited to ``tmp_root`` and the
+    # target's ``.git/`` dir) — same containment posture as the
+    # resolver runners that execute ``./mvnw`` / ``./gradlew`` etc.
+    target_git_dir = str(target / ".git")
     try:
         # ``git stash create`` materialises the working tree (including
         # uncommitted changes) into a stash *commit object* WITHOUT
@@ -821,9 +833,14 @@ def _run_self_test(
         # means there are no uncommitted changes; we fall back to HEAD.
         # This makes the self-test see the same state harden's planner
         # saw — critical when the user is mid-edit.
-        stash = subprocess.run(
+        stash = run_untrusted(
             ["git", "stash", "create"],
-            cwd=str(target), capture_output=True, text=True, timeout=30,
+            target=str(target),
+            output=str(tmp_root),
+            writable_paths=[target_git_dir],
+            cwd=str(target),
+            capture_output=True, text=True, timeout=30,
+            caller_label="sca-harden-self-test/git-stash",
         )
         if stash.returncode != 0:
             print(f"raptor-sca fix --harden --self-test: `git stash create` failed: "
@@ -834,20 +851,36 @@ def _run_self_test(
         # ``git worktree add`` creates a parallel working tree at that
         # ref without copying the project; fast, uses no extra disk for
         # the bulk of the tree (only the diffed files cost space).
-        proc = subprocess.run(
+        proc = run_untrusted(
             ["git", "worktree", "add", "--detach", str(worktree),
               worktree_ref],
-            cwd=str(target), capture_output=True, text=True, timeout=120,
+            target=str(target),
+            output=str(tmp_root),
+            writable_paths=[target_git_dir],
+            cwd=str(target),
+            capture_output=True, text=True, timeout=120,
+            caller_label="sca-harden-self-test/git-worktree-add",
         )
         if proc.returncode != 0:
             print(f"raptor-sca fix --harden --self-test: git worktree add failed: "
                   f"{proc.stderr or proc.stdout}", file=sys.stderr)
             return 6
 
-        # Apply the patch inside the worktree.
-        proc = subprocess.run(
-            ["git", "apply", str(patch_path)],
-            cwd=str(worktree), capture_output=True, text=True, timeout=60,
+        # Apply the patch inside the worktree. The patch lives at
+        # ``out_dir/upgrade.patch`` which is outside both the
+        # target and ``tmp_root`` (and therefore not readable
+        # inside the sandbox). Read it here and feed via stdin so
+        # the sandbox never needs read access to ``out_dir``.
+        patch_text = patch_path.read_text(encoding="utf-8")
+        proc = run_untrusted(
+            ["git", "apply", "-"],
+            target=str(tmp_root),
+            output=str(tmp_root),
+            writable_paths=[target_git_dir],
+            cwd=str(worktree),
+            input=patch_text,
+            capture_output=True, text=True, timeout=60,
+            caller_label="sca-harden-self-test/git-apply",
         )
         if proc.returncode != 0:
             print(f"raptor-sca fix --harden --self-test: patch application failed: "
@@ -890,10 +923,22 @@ def _run_self_test(
         # Tear down the worktree; ignore failures since we may be cleaning
         # up after a partial setup.
         if worktree.exists():
-            subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
-                cwd=str(target), capture_output=True, text=True, timeout=60,
-            )
+            try:
+                run_untrusted(
+                    ["git", "worktree", "remove", "--force",
+                     str(worktree)],
+                    target=str(target),
+                    output=str(tmp_root),
+                    writable_paths=[target_git_dir],
+                    cwd=str(target),
+                    capture_output=True, text=True, timeout=60,
+                    caller_label="sca-harden-self-test/git-worktree-remove",
+                )
+            except Exception:                       # noqa: BLE001
+                # Cleanup is best-effort; rmtree below removes the
+                # files regardless of whether git's bookkeeping
+                # got tidied.
+                pass
         import shutil
         shutil.rmtree(tmp_root, ignore_errors=True)
 

