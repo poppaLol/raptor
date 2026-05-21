@@ -748,6 +748,9 @@ class AutonomousSecurityAgentV2:
             build_analysis_prompt_bundle,
             build_analysis_schema,
         )
+        from packages.llm_analysis.source_intel_inject import (
+            evidence_blocks_for_finding,
+        )
 
         analysis_schema = build_analysis_schema(has_dataflow=vuln.has_dataflow)
 
@@ -759,6 +762,15 @@ class AutonomousSecurityAgentV2:
         function_name = meta.get("name") or ""
         file_includes = meta.get("includes") or ()
         function_calls_made = meta.get("calls") or meta.get("callees") or ()
+
+        # Pull source_intel evidence (cached during sequential-mode
+        # priming earlier in this run). Returns () for rule_ids not
+        # in the memory-corruption set or when prep failed.
+        si_blocks = evidence_blocks_for_finding({
+            "rule_id": vuln.rule_id,
+            "repo_path": str(vuln.repo_path),
+            "metadata": meta,
+        })
 
         bundle = build_analysis_prompt_bundle(
             rule_id=vuln.rule_id,
@@ -779,6 +791,7 @@ class AutonomousSecurityAgentV2:
             function_name=function_name,
             file_includes=file_includes,
             function_calls_made=function_calls_made,
+            extra_blocks=si_blocks,
         )
         prompt = next(m.content for m in bundle.messages if m.role == "user")
         system_prompt = next(m.content for m in bundle.messages if m.role == "system")
@@ -1113,6 +1126,15 @@ class AutonomousSecurityAgentV2:
         logger.info(f"   Target: {vuln.file_path}:{vuln.start_line}")
 
         from packages.llm_analysis.prompts.exploit import build_exploit_prompt_bundle
+        from packages.llm_analysis.source_intel_inject import (
+            evidence_blocks_for_finding,
+        )
+
+        si_blocks = evidence_blocks_for_finding({
+            "rule_id": vuln.rule_id,
+            "repo_path": str(vuln.repo_path),
+            "metadata": vuln.metadata or {},
+        })
 
         bundle = build_exploit_prompt_bundle(
             rule_id=vuln.rule_id,
@@ -1123,6 +1145,7 @@ class AutonomousSecurityAgentV2:
             code=vuln.full_code,
             surrounding_context=vuln.surrounding_context,
             feasibility=vuln.feasibility if hasattr(vuln, 'feasibility') else None,
+            extra_blocks=si_blocks,
         )
         prompt = next(m.content for m in bundle.messages if m.role == "user")
         system_prompt = next(m.content for m in bundle.messages if m.role == "system")
@@ -1314,11 +1337,20 @@ class AutonomousSecurityAgentV2:
             full_file_content = f.read()
 
         from packages.llm_analysis.prompts.patch import build_patch_prompt_bundle
+        from packages.llm_analysis.source_intel_inject import (
+            evidence_blocks_for_finding,
+        )
 
         # Load attack path if available
         attack_path = None
         if vuln.attack_path_ref:
             attack_path = self._load_attack_path(vuln.attack_path_ref)
+
+        si_blocks = evidence_blocks_for_finding({
+            "rule_id": vuln.rule_id,
+            "repo_path": str(vuln.repo_path),
+            "metadata": vuln.metadata or {},
+        })
 
         bundle = build_patch_prompt_bundle(
             rule_id=vuln.rule_id,
@@ -1331,6 +1363,7 @@ class AutonomousSecurityAgentV2:
             full_file_content=full_file_content,
             feasibility=vuln.feasibility,
             attack_path=attack_path,
+            extra_blocks=si_blocks,
         )
         prompt = next(m.content for m in bundle.messages if m.role == "user")
         system_prompt = next(m.content for m in bundle.messages if m.role == "system")

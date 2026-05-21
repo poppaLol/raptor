@@ -146,7 +146,18 @@ class ExploitTask(DispatchTask):
         return selected
 
     def build_prompt(self, finding):
-        bundle = build_exploit_prompt_bundle_from_finding(finding, profile=self.profile)
+        # Phase D: inject source_intel structural evidence for
+        # memory-corruption findings so the exploit generator sees the
+        # same structural context the analysis step saw (allocations,
+        # hazards, sanitizer-shaped sites). Returns () for irrelevant
+        # rule_ids — no LLM-cost overhead on non-target findings.
+        from packages.llm_analysis.source_intel_inject import (
+            evidence_blocks_for_finding,
+        )
+        si_blocks = evidence_blocks_for_finding(finding)
+        bundle = build_exploit_prompt_bundle_from_finding(
+            finding, profile=self.profile, extra_blocks=si_blocks,
+        )
         self._tls.nonce = bundle.nonce
         return _user_message_from_bundle(bundle)
 
@@ -203,7 +214,18 @@ class PatchTask(DispatchTask):
         return selected
 
     def build_prompt(self, finding):
-        bundle = build_patch_prompt_bundle_from_finding(finding, profile=self.profile)
+        # Phase D: inject source_intel structural evidence so the
+        # patch generator sees the structural context (allocations,
+        # hazards, sanitizer-shaped sites) when crafting a fix.
+        # Returns () for irrelevant rule_ids — no LLM-cost overhead
+        # on non-target findings.
+        from packages.llm_analysis.source_intel_inject import (
+            evidence_blocks_for_finding,
+        )
+        si_blocks = evidence_blocks_for_finding(finding)
+        bundle = build_patch_prompt_bundle_from_finding(
+            finding, profile=self.profile, extra_blocks=si_blocks,
+        )
         self._tls.nonce = bundle.nonce
         return _user_message_from_bundle(bundle)
 
