@@ -314,7 +314,7 @@
       "finding_id": "sca:vuln:Cargo:mio:0.8.9:GHSA-r8w9-5wcg-vfj7",
       "in_kev": false,
       "purl": "pkg:cargo/mio@0.8.9",
-      "raptor_risk_estimate": 10.375106156249998,
+      "raptor_risk_estimate": 12.346376325937499,
       "reachability": {
         "confidence": {
           "level": "high",
@@ -344,7 +344,8 @@
         "reachability_multiplier": 1.0,
         "version_match_confidence": 0.95
       },
-      "severity": "high"
+      "severity": "high",
+      "ssvc_exploitation": "poc"
     }
   ]
 }

@@ -451,6 +451,7 @@ def _load_ground_truth(corpus_dir: Path) -> set:
         "kev_signals.json", "exploitdb_signals.json",
         "metasploit_signals.json", "github_poc_signals.json",
         "osv_evidence_signals.json",
+        "vulnrichment_signals.json",
     ):
         path = corpus_dir / fname
         if not path.is_file():
@@ -708,6 +709,17 @@ def _compute_with_overrides(
     else:
         ee = None
 
+    # CISA Vulnrichment SSVC ``Exploitation`` field — same shape as
+    # the runtime ``VulnFinding.ssvc_exploitation`` (``"active"`` /
+    # ``"poc"`` / ``"none"`` / ``None``). Pre-fix this field was
+    # dropped during rebuild, so refit's grid search couldn't see
+    # the SSVC-active / SSVC-poc multiplier branches — every
+    # rescored finding had ``ssvc_exploitation=None`` regardless
+    # of what the archive recorded.
+    ssvc = finding.get("ssvc_exploitation")
+    if ssvc not in ("active", "poc", "none"):
+        ssvc = None
+
     vf = VulnFinding(
         finding_id=finding.get("finding_id", "?"),
         dependency=dep,
@@ -723,6 +735,7 @@ def _compute_with_overrides(
         exposure_factor=float(finding.get("exposure_factor", 0.0)),
         transitive_depth=int(finding.get("transitive_depth", 0)),
         exploit_evidence=ee,
+        ssvc_exploitation=ssvc,
     )
     return compute_risk_estimate(vf, dep, overrides=overrides)
 

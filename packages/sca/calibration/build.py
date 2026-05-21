@@ -80,7 +80,7 @@ def build_corpus(
 
     if sources is None:
         sources = ["kev", "epss", "exploitdb", "metasploit",
-                   "github_poc", "osv_evidence"]
+                   "github_poc", "osv_evidence", "vulnrichment"]
 
     results: List[BuildResult] = []
     for source in sources:
@@ -97,6 +97,8 @@ def build_corpus(
                 results.append(_build_github_poc(out_dir, http))
             elif source == "osv_evidence":
                 results.append(_build_osv_evidence(out_dir, http))
+            elif source == "vulnrichment":
+                results.append(_build_vulnrichment(out_dir, http))
             else:
                 results.append(BuildResult(
                     source=source, written=False,
@@ -650,6 +652,168 @@ def _is_exploit_host_url(url: str) -> bool:
     if host.startswith("www."):
         host = host[4:]
     return host in _OSV_EVIDENCE_EXPLOIT_HOSTS
+
+
+def _build_vulnrichment(out_dir: Path, http: Any) -> BuildResult:
+    """Fetch the CISA Vulnrichment repository tarball, walk every
+    CVE-*.json record, and emit a CVE-keyed signal file for any
+    entry with SSVC ``Exploitation`` of ``poc`` or ``active``.
+
+    Vulnrichment is one of the cleanest cross-eco exploitation
+    signals — CC0 1.0 public domain, vendor-neutral (US Government
+    work, the cisagov organization), and covers ~60% of CVEs in
+    ecosystems where the existing five signal sources (KEV / EDB /
+    MSF / GitHub-PoC / OSV-Evidence) return ~0% coverage (Cargo /
+    NuGet / Packagist). See ``project_sca_post_ship_deferred.md``
+    for the trigger-driven research that selected this source.
+
+    SSVC values are normalised to lowercase. We deliberately drop
+    ``none`` entries — they carry no exploit signal and would
+    bloat the file by ~3x without adding any signal. Operators
+    needing the full ``none`` set should query
+    ``core.cve.vulnrichment.VulnrichmentClient`` at runtime.
+
+    The tarball is ~60 MB compressed / ~280 MB extracted. We
+    stream the archive members through ``tarfile`` without
+    extracting to disk; only the per-CVE SSVC fields are kept in
+    memory. ``max_bytes`` ceiling (300 MB) is a defence against
+    a tarball that grew unexpectedly — operators can lift the
+    cap by re-fetching outside the build if needed.
+    """
+    import gzip
+    import io
+    import tarfile
+
+    VULNRICHMENT_TARBALL = (
+        "https://codeload.github.com/cisagov/vulnrichment/tar.gz/"
+        "refs/heads/main"
+    )
+    raw = http.get_bytes(
+        VULNRICHMENT_TARBALL, max_bytes=300 * 1024 * 1024,
+    )
+    signals: Dict[str, Dict[str, Any]] = {}
+    files_scanned = 0
+    with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
+        with tarfile.open(fileobj=gz, mode="r|") as tar:
+            for member in tar:
+                if not member.isfile():
+                    continue
+                name = member.name
+                if not name.endswith(".json"):
+                    continue
+                base = name.rsplit("/", 1)[-1]
+                if not base.startswith("CVE-"):
+                    continue
+                files_scanned += 1
+                f = tar.extractfile(member)
+                if f is None:
+                    continue
+                try:
+                    record = json.loads(f.read())
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                decision = _vulnrichment_extract_ssvc(record)
+                if decision is None:
+                    continue
+                exploitation = decision["exploitation"]
+                if exploitation not in ("poc", "active"):
+                    # ``none`` carries no exploit signal — skip.
+                    # Future versions may also keep ``none``
+                    # entries for completeness; today the
+                    # ground-truth file is the union-of-signals
+                    # set, so a non-signal entry is a no-op.
+                    continue
+                cve_id = (
+                    record.get("cveMetadata", {}).get("cveId") or ""
+                ).upper()
+                if not cve_id.startswith("CVE-"):
+                    continue
+                signals[cve_id] = {
+                    "ssvc_exploitation": exploitation,
+                    "ssvc_automatable": decision.get("automatable"),
+                    "ssvc_technical_impact": decision.get(
+                        "technical_impact",
+                    ),
+                }
+    output = {
+        "_source": {
+            "name": "CISA Vulnrichment (SSVC Exploitation)",
+            "url": VULNRICHMENT_TARBALL,
+            "license": "CC0 1.0 Universal (Public Domain)",
+            "fetched_at": _utcnow(),
+            "provenance": (
+                "CISA Vulnrichment SSVC scorecards filtered to "
+                "entries with Exploitation=poc or =active. "
+                "Skips ``none`` entries; a missing CVE means "
+                "either no SSVC scorecard yet OR SSVC=none "
+                "(query VulnrichmentClient at runtime for the "
+                "full picture)."
+            ),
+            "files_scanned": files_scanned,
+        },
+        "signals": dict(sorted(signals.items())),
+    }
+    return _write_if_changed(
+        out_dir / "vulnrichment_signals.json", output,
+        source="vulnrichment", record_count=len(signals),
+    )
+
+
+def _vulnrichment_extract_ssvc(record: Any) -> Optional[Dict[str, Any]]:
+    """Pluck SSVC fields out of a CVE-JSON-5 record's CISA-ADP
+    container. Returns ``{"exploitation", "automatable",
+    "technical_impact"}`` or ``None`` if the entry lacks an SSVC
+    scorecard.
+
+    Defensive: any unexpected shape → ``None``. Mirrors
+    :func:`core.cve.vulnrichment._decode_ssvc` so a future schema
+    change touches both. (Both kept independent for now to avoid
+    a build-time import of the runtime client.)
+    """
+    if not isinstance(record, dict):
+        return None
+    containers = record.get("containers")
+    if not isinstance(containers, dict):
+        return None
+    adp = containers.get("adp")
+    if not isinstance(adp, list):
+        return None
+    for entry in adp:
+        if not isinstance(entry, dict):
+            continue
+        provider = (
+            (entry.get("providerMetadata") or {}).get("shortName") or ""
+        )
+        if "CISA-ADP" not in provider:
+            continue
+        for metric in entry.get("metrics") or []:
+            if not isinstance(metric, dict):
+                continue
+            content = (metric.get("other") or {}).get("content") or {}
+            options = content.get("options")
+            if not isinstance(options, list):
+                continue
+            exploitation = None
+            automatable = None
+            technical_impact = None
+            for opt in options:
+                if not isinstance(opt, dict):
+                    continue
+                if "Exploitation" in opt:
+                    exploitation = str(opt["Exploitation"]).lower()
+                if "Automatable" in opt:
+                    automatable = str(opt["Automatable"]).lower()
+                if "Technical Impact" in opt:
+                    technical_impact = (
+                        str(opt["Technical Impact"]).lower()
+                    )
+            if exploitation in ("none", "poc", "active"):
+                return {
+                    "exploitation": exploitation,
+                    "automatable": automatable,
+                    "technical_impact": technical_impact,
+                }
+    return None
 
 
 # ---------------------------------------------------------------------------

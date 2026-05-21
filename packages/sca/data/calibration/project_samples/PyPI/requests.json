@@ -111,7 +111,7 @@
       "finding_id": "sca:vuln:PyPI:black:22.3.0:GHSA-fj7x-q9j7-g6q6",
       "in_kev": false,
       "purl": "pkg:pypi/black@22.3.0",
-      "raptor_risk_estimate": 6.721187205356249,
+      "raptor_risk_estimate": 9.054580499291248,
       "reachability": {
         "confidence": {
           "level": "low",
@@ -134,7 +134,8 @@
         "reachability_multiplier": 0.935,
         "version_match_confidence": 0.95
       },
-      "severity": "medium"
+      "severity": "medium",
+      "ssvc_exploitation": "poc"
     },
     {
       "advisory": {
@@ -176,7 +177,7 @@
       "finding_id": "sca:vuln:PyPI:cryptography:40.0.0:GHSA-3ww4-gg4f-jr7f",
       "in_kev": false,
       "purl": "pkg:pypi/cryptography@40.0.0",
-      "raptor_risk_estimate": 10.35567984375,
+      "raptor_risk_estimate": 12.323259014062499,
       "reachability": {
         "confidence": {
           "level": "high",
@@ -202,7 +203,8 @@
         "reachability_multiplier": 1.0,
         "version_match_confidence": 0.95
       },
-      "severity": "high"
+      "severity": "high",
+      "ssvc_exploitation": "poc"
     },
     {
       "advisory": {
@@ -443,7 +445,7 @@
       "finding_id": "sca:vuln:PyPI:cryptography:40.0.0:GHSA-cf7p-gm2m-833m",
       "in_kev": false,
       "purl": "pkg:pypi/cryptography@40.0.0",
-      "raptor_risk_estimate": 10.41253734375,
+      "raptor_risk_estimate": 12.390919439062497,
       "reachability": {
         "confidence": {
           "level": "high",
@@ -469,7 +471,8 @@
         "reachability_multiplier": 1.0,
         "version_match_confidence": 0.95
       },
-      "severity": "high"
+      "severity": "high",
+      "ssvc_exploitation": "poc"
     },
     {
       "advisory": {
@@ -572,7 +575,7 @@
       "finding_id": "sca:vuln:PyPI:cryptography:40.0.0:GHSA-jfhm-5ghh-2f97",
       "in_kev": false,
       "purl": "pkg:pypi/cryptography@40.0.0",
-      "raptor_risk_estimate": 8.15653192125,
+      "raptor_risk_estimate": 9.870786087749998,
       "reachability": {
         "confidence": {
           "level": "high",
@@ -598,7 +601,8 @@
         "reachability_multiplier": 1.0,
         "version_match_confidence": 0.95
       },
-      "severity": "medium"
+      "severity": "medium",
+      "ssvc_exploitation": "poc"
     },
     {
       "advisory": {
