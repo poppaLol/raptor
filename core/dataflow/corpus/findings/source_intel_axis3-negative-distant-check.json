@@ -6,14 +6,14 @@
   "message": "Pointer `p` from kstrdup dereferenced via `use_string(p)`.",
   "source": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis3_negative_distant_check.c",
-    "line": 38,
+    "line": 39,
     "column": 2,
     "snippet": "p = kstrdup(s, 0);",
     "label": "source"
   },
   "sink": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis3_negative_distant_check.c",
-    "line": 41,
+    "line": 42,
     "column": 2,
     "snippet": "use_string(p);",
     "label": "sink"

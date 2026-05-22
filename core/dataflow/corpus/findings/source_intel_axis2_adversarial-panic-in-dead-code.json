@@ -6,14 +6,14 @@
   "message": "source_intel_axis2_adversarial-panic-in-dead-code",
   "source": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis2_adversarial_panic_in_dead_code.c",
-    "line": 13,
+    "line": 14,
     "column": 2,
     "snippet": "*p = 1;",
     "label": "source"
   },
   "sink": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis2_adversarial_panic_in_dead_code.c",
-    "line": 13,
+    "line": 14,
     "column": 2,
     "snippet": "*p = 1;",
     "label": "sink"

@@ -8,12 +8,12 @@
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis4_capability_suite.c",
     "line": 111,
     "column": 2,
-    "snippet": "declared as enclosing fn",
+    "snippet": "int userns_admin_op(struct user_namespace *ns,",
     "label": "source"
   },
   "sink": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis4_capability_suite.c",
-    "line": 116,
+    "line": 49,
     "column": 2,
     "snippet": "memcpy(buf, user, len);",
     "label": "sink"

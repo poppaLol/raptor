@@ -8,7 +8,7 @@
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis4_capability_suite.c",
     "line": 131,
     "column": 2,
-    "snippet": "declared as enclosing fn",
+    "snippet": "int finding_target_no_gate(const char *user, size_t len)",
     "label": "source"
   },
   "sink": {

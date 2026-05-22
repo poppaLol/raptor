@@ -8,14 +8,14 @@
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis1_attribute_suite.c",
     "line": 69,
     "column": 2,
-    "snippet": "writer(buf, want);  /* annotated bounds */",
+    "snippet": "writer(buf, want);  /* annotated bounds; cocci/Stage D reasoning */",
     "label": "source"
   },
   "sink": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis1_attribute_suite.c",
     "line": 69,
     "column": 2,
-    "snippet": "writer(buf, want);  /* annotated bounds */",
+    "snippet": "writer(buf, want);  /* annotated bounds; cocci/Stage D reasoning */",
     "label": "sink"
   },
   "intermediate_steps": [],

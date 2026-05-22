@@ -6,14 +6,14 @@
   "message": "source_intel_axis7_multifile-static-dead-suppress",
   "source": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis7_multifile_dead/main.c",
-    "line": 4,
+    "line": 5,
     "column": 2,
     "snippet": "strcpy(buf, user);",
     "label": "source"
   },
   "sink": {
     "file_path": "packages/llm_analysis/tests/fixtures/source_intel/axis7_multifile_dead/main.c",
-    "line": 4,
+    "line": 5,
     "column": 2,
     "snippet": "strcpy(buf, user);",
     "label": "sink"
