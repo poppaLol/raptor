@@ -791,6 +791,7 @@ def _rewrite_one(
     manifest: Path, text: str, plan: _PlanEntry,
 ) -> Tuple[str, bool, Optional[str]]:
     name = manifest.name
+    suffix = manifest.suffix.lower()
     if name == "pom.xml":
         return _rewrite_pom_xml(text, plan)
     if name == "package.json":
@@ -799,9 +800,78 @@ def _rewrite_one(
         return _rewrite_pyproject_toml(text, plan)
     if name.startswith("requirements") and name.endswith(".txt"):
         return _rewrite_requirements_txt(text, plan)
+    # NuGet write surfaces. Two file shapes — caller picks the
+    # right one via ``plan.manifest`` (set by the planner to
+    # match the dep's source-origin field).
+    if name == "Directory.Packages.props":
+        return _rewrite_via_registry(manifest, text, plan)
+    if suffix in (".csproj", ".fsproj", ".vbproj"):
+        return _rewrite_via_registry(manifest, text, plan)
+    # Gradle write surface — libs.versions.toml. Inline
+    # build.gradle / build.gradle.kts edits are NOT supported
+    # by harden today (DSL rewrite is risky given Turing-complete
+    # Groovy / Kotlin). The catalog covers modern projects which
+    # is where most operator demand is.
+    if name == "libs.versions.toml":
+        return _rewrite_via_registry(manifest, text, plan)
     if _is_inline_install_file(manifest):
         return _rewrite_inline_install(text, plan)
     return text, False, f"no rewriter for {name}"
+
+
+def _rewrite_via_registry(
+    manifest: Path, text: str, plan: _PlanEntry,
+) -> Tuple[str, bool, Optional[str]]:
+    """Bridge to the ``packages/sca/rewriters/`` registry — used
+    by NuGet CPM / csproj / Gradle catalog paths. The registry
+    operates on file paths (it reads + atomic-writes the file
+    itself), but ``_rewrite_one``'s contract is text-in / text-
+    out + bool applied + reason. Adapt by:
+
+      * Synthesise a single ``RewriteEdit`` from the plan.
+      * Call the registry's dispatcher.
+      * Read back the (possibly mutated) file content.
+
+    For Gradle catalogs the locator needs a section prefix
+    (``library:<alias>`` / ``version:<key>`` / ``plugin:<alias>``).
+    Harden's plan doesn't carry source-origin metadata today;
+    we default to ``library:<name>`` which covers the common
+    case (catalog libraries with inline versions). version.ref-
+    resolved entries fall through with ``not_found``; the bumper
+    will route them correctly once it learns about the catalog
+    layout (separate piece of work).
+    """
+    from .rewriters import RewriteEdit, rewrite as _rewrite
+
+    if manifest.name == "libs.versions.toml":
+        # Default locator: target the library entry directly.
+        # When the catalog uses ``version.ref`` the rewriter
+        # returns ``not_found``; an operator who hits this can
+        # set the version.ref'd entry by hand or wait for the
+        # bumper-side catalog routing.
+        locator = f"library:{plan.name}"
+    else:
+        locator = plan.name
+
+    edit = RewriteEdit(
+        locator=locator,
+        old_value=plan.installed,
+        new_value=plan.target,
+    )
+    results = _rewrite(manifest, [edit])
+    if not results:
+        return text, False, f"no rewriter for {manifest.name}"
+    r = results[0]
+    if r.applied:
+        # Reload the file content for the caller. The rewriter
+        # already wrote atomically; this read is the canonical
+        # post-state.
+        try:
+            new_text = manifest.read_text(encoding="utf-8")
+        except OSError as e:
+            return text, False, f"error: post-write read failed: {e}"
+        return new_text, True, None
+    return text, False, r.reason
 
 
 def _is_inline_install_file(path: Path) -> bool:

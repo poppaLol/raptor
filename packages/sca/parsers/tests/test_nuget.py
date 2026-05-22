@@ -283,3 +283,327 @@ def test_dispatch_lockfile_via_filename(tmp_path: Path) -> None:
     assert lock.ecosystem == "NuGet"
     deps = dispatch(lock)
     assert deps and deps[0].name == "Foo"
+
+
+# ---------------------------------------------------------------------------
+# Central Package Management (CPM) — Directory.Packages.props resolution
+# ---------------------------------------------------------------------------
+
+def _cpm_setup(
+    tmp_path: Path, csproj_body: str, cpm_body: str,
+    *, sub_dir: str = "",
+    inner_cpm_body: str = "",
+    use_git: bool = True,
+) -> Path:
+    """Build a CPM-shaped test repo. ``cpm_body`` is the root
+    Directory.Packages.props; ``inner_cpm_body`` (when set) goes
+    in ``sub_dir`` for hierarchical-resolution tests.
+
+    A ``.git`` directory is created at the repo root to bound the
+    ``find_cpm_chain`` walk — without it, the chain walks all
+    the way to the filesystem root and may accidentally pick up
+    /tmp/Directory.Packages.props from a parallel test run.
+    """
+    if use_git:
+        (tmp_path / ".git").mkdir(exist_ok=True)
+    (tmp_path / "Directory.Packages.props").write_text(
+        cpm_body, encoding="utf-8",
+    )
+    csproj_dir = tmp_path / sub_dir if sub_dir else tmp_path
+    csproj_dir.mkdir(parents=True, exist_ok=True)
+    if inner_cpm_body:
+        (csproj_dir / "Directory.Packages.props").write_text(
+            inner_cpm_body, encoding="utf-8",
+        )
+    csproj = csproj_dir / "App.csproj"
+    csproj.write_text(csproj_body, encoding="utf-8")
+    return csproj
+
+
+def test_cpm_resolves_versionless_package_reference(tmp_path: Path):
+    """Modern .NET pattern: csproj has no Version attribute, the
+    version comes from Directory.Packages.props. Pre-fix SCA
+    silently dropped these; post-fix the CPM lookup resolves them."""
+    # Reset the CPM parse cache so this test's writes are seen
+    # fresh — without this, a sibling test could pre-populate
+    # the cache.
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert len(deps) == 1
+    assert deps[0].name == "Newtonsoft.Json"
+    assert deps[0].version == "13.0.3"
+    assert deps[0].source_extra.get("origin") == "cpm_central"
+
+
+def test_csproj_inline_version_overrides_cpm(tmp_path: Path):
+    """Precedence: csproj inline Version dominates over CPM
+    entry, matching MSBuild's resolution. Pre-CPM-era projects
+    that adopted CPM partial typically rely on this."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" Version="2.0.0" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="X" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert deps[0].version == "2.0.0"
+    assert deps[0].source_extra.get("origin") == "inline_version"
+
+
+def test_version_override_takes_precedence_over_cpm(tmp_path: Path):
+    """``<PackageReference Include="X" VersionOverride="9.9.9" />``
+    is the documented escape hatch for per-csproj overrides of
+    a CPM-managed version. Resolver must honour."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" VersionOverride="9.9.9" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="X" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert deps[0].version == "9.9.9"
+    assert deps[0].source_extra.get("origin") == "version_override"
+
+
+def test_inner_cpm_overrides_outer(tmp_path: Path):
+    """Hierarchical: a Directory.Packages.props at ``src/MyLib/``
+    overrides a Directory.Packages.props at the repo root for the
+    same package name."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <ItemGroup><PackageVersion Include="X" Version="1.0.0" /></ItemGroup>
+</Project>
+""",
+        sub_dir="src/MyLib",
+        inner_cpm_body="""\
+<Project>
+  <ItemGroup><PackageVersion Include="X" Version="2.0.0" /></ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert deps[0].version == "2.0.0"
+
+
+def test_global_package_reference_auto_emitted(tmp_path: Path):
+    """``<GlobalPackageReference>`` is forcibly included in
+    every csproj in the solution. The resolver emits these as
+    Dependency rows even when the csproj never explicitly
+    references the package."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="X" Version="1.0.0" />
+    <GlobalPackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    by_name = {d.name: d for d in deps}
+    assert "X" in by_name
+    assert "Microsoft.SourceLink.GitHub" in by_name
+    assert by_name["Microsoft.SourceLink.GitHub"].version == "1.1.1"
+    assert by_name["Microsoft.SourceLink.GitHub"].source_extra.get("origin") == "cpm_global"
+
+
+def test_directory_build_props_provides_version_for_csproj(
+    tmp_path: Path,
+):
+    """Pre-CPM convention: a versionless ``<PackageReference>`` in
+    csproj can pull its version from an inherited
+    ``Directory.Build.props`` with a versioned PackageReference
+    of the same name. SCA must read that path so projects that
+    haven't migrated to CPM yet still get full coverage."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "Directory.Build.props").write_text(
+        """\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""", encoding="utf-8",
+    )
+    csproj = tmp_path / "App.csproj"
+    csproj.write_text(
+        """\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" />
+  </ItemGroup>
+</Project>
+""", encoding="utf-8",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert len(deps) == 1
+    assert deps[0].name == "Microsoft.SourceLink.GitHub"
+    assert deps[0].version == "1.0.0"
+    # Origin labels it ``cpm_central`` because the resolver treats
+    # Directory.Build.props PackageReference entries as
+    # central-declaration-equivalent (it's the same mechanism
+    # MSBuild uses for auto-import). The bumper rewriter will
+    # disambiguate the actual file at write time.
+    assert deps[0].source_extra.get("origin") == "cpm_central"
+
+
+def test_cpm_overrides_directory_build_props_for_same_dir(tmp_path: Path):
+    """Within the same directory, Directory.Packages.props (CPM)
+    is applied AFTER Directory.Build.props — so CPM's
+    PackageVersion overrides the inherited PackageReference's
+    Version when both declare the same package name. Matches
+    MSBuild import order."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "Directory.Build.props").write_text(
+        """\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""", encoding="utf-8",
+    )
+    (tmp_path / "Directory.Packages.props").write_text(
+        """\
+<Project>
+  <ItemGroup>
+    <PackageVersion Include="X" Version="2.0.0" />
+  </ItemGroup>
+</Project>
+""", encoding="utf-8",
+    )
+    csproj = tmp_path / "App.csproj"
+    csproj.write_text(
+        """\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" />
+  </ItemGroup>
+</Project>
+""", encoding="utf-8",
+    )
+    deps = parse_msbuild_project(csproj)
+    assert deps[0].version == "2.0.0"
+
+
+def test_cpm_disabled_returns_to_inline_only(tmp_path: Path):
+    """``<ManagePackageVersionsCentrally>false</>`` disables CPM
+    even when the file is present. The csproj's versionless
+    PackageReference becomes unresolvable; we skip it and the
+    test verifies no Dependency is emitted."""
+    from packages.sca.parsers.directory_packages_props import (
+        _reset_cache_for_tests,
+    )
+    _reset_cache_for_tests()
+    csproj = _cpm_setup(
+        tmp_path,
+        csproj_body="""\
+<Project>
+  <ItemGroup>
+    <PackageReference Include="X" />
+    <PackageReference Include="Y" Version="2.0.0" />
+  </ItemGroup>
+</Project>
+""",
+        cpm_body="""\
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="X" Version="1.0.0" />
+  </ItemGroup>
+</Project>
+""",
+    )
+    deps = parse_msbuild_project(csproj)
+    names = {d.name for d in deps}
+    assert names == {"Y"}    # X dropped — CPM disabled, no inline
+

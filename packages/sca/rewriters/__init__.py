@@ -160,6 +160,15 @@ from . import dockerfile_from         # noqa: E402,F401
 from . import gha_uses                # noqa: E402,F401
 from . import helm_chart              # noqa: E402,F401
 from . import yaml_image              # noqa: E402,F401
+# CPM + Gradle catalog rewriters — close the modern .NET / Gradle
+# write-side gap. Without these, harden / bumper writes against
+# CPM-using csproj would either fail (no inline Version to match)
+# or update the wrong file (csproj override that doesn't
+# propagate). See ``parsers/directory_packages_props`` +
+# ``parsers/gradle_version_catalog`` for the read-side.
+from . import csproj                              # noqa: E402,F401
+from . import directory_packages_props            # noqa: E402,F401
+from . import gradle_version_catalog              # noqa: E402,F401
 
 
 __all__ = [

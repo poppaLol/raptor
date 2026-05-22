@@ -493,6 +493,75 @@ PROJECT_SAMPLES: List[ProjectSample] = [
         repo_url="https://github.com/drush-ops/drush.git",
         git_ref="12.5.0", license_spdx="MIT",
     ),
+
+    # ---- Round-9 CPM + Gradle catalog parser-coverage (2026-05-22) ---
+    # Earlier NuGet expansion was capped by the "CPM trap" — most
+    # modern .NET projects centralise versions in
+    # ``Directory.Packages.props`` and the csproj parser previously
+    # skipped versionless ``<PackageReference>`` rows. Round-9 ships
+    # the CPM read-side parser
+    # (``parsers/directory_packages_props.py``) + the version-
+    # override walk + .sln-based discovery; the samples below
+    # exercise those code paths against real CPM-using apps. Same
+    # idea for Gradle's ``libs.versions.toml`` catalog — its
+    # accessor-style references resolve via the new
+    # ``parsers/gradle_version_catalog.py``.
+    #
+    # When these samples join the corpus they validate END-TO-END
+    # (parse → resolve → OSV-match → finding row) and contribute
+    # to per-ecosystem ρ measurement for NuGet / Maven exactly
+    # like every other sample. They are NOT separate / parallel
+    # measurement; they DENSIFY the existing per-eco signal pool
+    # with deps the parsers couldn't reach before.
+
+    # NuGet CPM. OrchardCore (BSD-3-Clause) is a modular ASP.NET
+    # Core CMS — heavily MSBuild + CPM-based. The repo's
+    # ``Directory.Packages.props`` carries ~140 PackageVersion
+    # rows; every csproj declares versionless PackageReference
+    # rows that previously resolved to nothing. With CPM read,
+    # the corpus picks up the full ~140-dep tree per csproj.
+    ProjectSample(
+        name="orchardcore-2.0", ecosystem="NuGet",
+        repo_url="https://github.com/OrchardCMS/OrchardCore.git",
+        git_ref="v2.0.0", license_spdx="BSD-3-Clause",
+    ),
+    # NodaTime (Apache-2.0) — date/time library that switched to
+    # Central Package Management in its 3.x series. Smaller dep
+    # tree (~25 PackageVersion) than OrchardCore but a clean
+    # canonical CPM layout (Directory.Packages.props + per-csproj
+    # versionless PackageReference) — useful as a tight regression
+    # case if a future change breaks CPM resolution. Library
+    # rather than app, but its CI deps + System.* runtime libs
+    # carry KEV / EDB / MSF / PoC signals.
+    ProjectSample(
+        name="nodatime-3.1", ecosystem="NuGet",
+        repo_url="https://github.com/nodatime/nodatime.git",
+        git_ref="3.1.9", license_spdx="Apache-2.0",
+    ),
+
+    # Maven Gradle catalog. Micronaut Core (Apache-2.0) is one of
+    # the largest production catalog adopters — ~250 library
+    # entries in ``gradle/libs.versions.toml``, accessed via
+    # ``libs.netty.codec`` / ``libs.managed.netty.codec`` accessor
+    # references across every subproject's ``build.gradle.kts``.
+    # Without catalog resolution the Gradle DSL parser would
+    # surface 0 deps for the kts files; with catalog read, every
+    # ``libs.*`` and ``libs.bundles.*`` accessor resolves to the
+    # group:artifact:version triple in the catalog.
+    ProjectSample(
+        name="micronaut-core-4.2", ecosystem="Maven",
+        repo_url="https://github.com/micronaut-projects/micronaut-core.git",
+        git_ref="v4.2.0", license_spdx="Apache-2.0",
+    ),
+    # Ktor (Apache-2.0) — JetBrains' Kotlin async-IO framework,
+    # uses ``libs.versions.toml`` with ~180 library entries. Pure
+    # Kotlin / KMP shape; surfaces deps the Java-mainstream
+    # samples (spring-boot, jenkins, micronaut) don't carry.
+    ProjectSample(
+        name="ktor-2.3", ecosystem="Maven",
+        repo_url="https://github.com/ktorio/ktor.git",
+        git_ref="2.3.7", license_spdx="Apache-2.0",
+    ),
 ]
 
 

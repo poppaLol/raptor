@@ -279,6 +279,17 @@ def find_manifests(
     if not repo.is_dir():
         raise NotADirectoryError(f"target is not a directory: {repo}")
 
+    # Scan-boundary cache reset: parsers with per-process caches
+    # (CPM, Gradle catalog) clear here so a stale parse from a
+    # previous scan on a different target can't leak across runs.
+    # Within this scan the caches are retained — csproj parsers
+    # walking up to the same Directory.Packages.props don't re-
+    # parse the file once per csproj.
+    from .parsers import directory_packages_props as _cpm
+    from .parsers import gradle_version_catalog as _gvc
+    _cpm.reset_cache()
+    _gvc.reset_cache()
+
     excludes = EXCLUDED_DIR_NAMES | (extra_excludes or set())
     found: List[Manifest] = []
 
@@ -290,9 +301,17 @@ def find_manifests(
     else:
         is_test_path = None
 
+    sln_paths: List[Path] = []
     for path in _walk(repo, max_depth=max_depth, excludes=excludes):
         eco = _classify(path)
         if eco is None:
+            # Track .sln separately — it's a discovery aid, not
+            # a manifest. Out-of-tree csproj referenced from a
+            # .sln get pulled in below for solution graph
+            # completeness (monorepos where ``src/A/A.sln``
+            # references ``src/Shared/Shared.csproj`` etc.).
+            if path.suffix.lower() == ".sln":
+                sln_paths.append(path)
             continue
         if is_test_path is not None and is_test_path(path, repo):
             continue
@@ -305,6 +324,31 @@ def find_manifests(
             workspace_root=None,  # populated by parser pass that knows
                                   # the workspace conventions
         ))
+
+    # Visual Studio solution (.sln) graph enrichment. csproj files
+    # referenced from a .sln but living outside the rglob tree
+    # (typical in monorepos with sibling-shared projects) are
+    # otherwise invisible to SCA. Dedupe against the rglob-found
+    # set; apply the same test-path filter as the primary walk.
+    if sln_paths:
+        from .parsers.sln import find_sln_referenced_csprojs
+        already_seen = {m.path for m in found}
+        for sln in sln_paths:
+            for csproj in find_sln_referenced_csprojs(
+                sln, repo_root=repo,
+            ):
+                if csproj in already_seen:
+                    continue
+                if is_test_path is not None and is_test_path(csproj, repo):
+                    continue
+                csproj_eco = _classify(csproj)
+                if csproj_eco is None:
+                    continue
+                found.append(Manifest(
+                    path=csproj, ecosystem=csproj_eco,
+                    is_lockfile=False, workspace_root=None,
+                ))
+                already_seen.add(csproj)
 
     # Deterministic ordering for stable test output.
     found.sort(key=lambda m: (str(m.path),))
