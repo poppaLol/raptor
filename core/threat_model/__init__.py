@@ -102,6 +102,8 @@ def _safe_for_render(value: Any, byte_cap: int = _MAX_STRING_BYTES) -> str:
     if value is None:
         return ""
     s = str(value)
+    if len(s) > byte_cap:
+        s = s[:byte_cap]
     # Structural-character strip FIRST, on the raw string.
     s = s.replace("\r", " ").replace("\n", " ")
     s = s.replace("`", "ʼ").replace("|", "ǀ")
@@ -996,9 +998,11 @@ def _render_records(title: str, records: list[dict[str, Any]], keys: tuple[str, 
             if value in (None, "", [], {}):
                 continue
             if isinstance(value, list):
-                value = ", ".join(str(v) for v in value)
+                value = ", ".join(_safe_for_render(v) for v in value)
+            else:
+                value = _safe_for_render(value)
             parts.append(f"{key}={value}")
-        lines.append(f"- {'; '.join(parts) if parts else record}")
+        lines.append(f"- {'; '.join(parts) if parts else _safe_for_render(str(record))}")
     lines.append("")
     return "\n".join(lines)
 
@@ -1023,7 +1027,8 @@ def _derive_domain_packs(context_map: dict[str, Any]) -> list[str]:
         packs.append("native")
     if any(token in text for token in ("iam", "s3", "lambda", "gcp", "azure", "aws", "cloud")):
         packs.append("cloud")
-    if any(token in text for token in ("prompt", "llm", "model", "embedding", "agent")):
+    _ai_tokens = ("prompt", "llm", "embedding", "langchain", "openai", "anthropic", "genai")
+    if sum(1 for t in _ai_tokens if t in text) >= 2:
         packs.append("ai")
     return _dedup(packs)
 
@@ -1249,7 +1254,7 @@ def _records(key: str, data: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     out: list[dict[str, Any]] = []
-    for item in value:
+    for item in value[:_MAX_LIST_ENTRIES]:
         if isinstance(item, dict):
             out.append(dict(item))
         elif isinstance(item, str) and item.strip():
@@ -1376,6 +1381,19 @@ def _controls_for_category(category: str) -> list[str]:
     return _dedup(controls)
 
 
+_CWE_NUMBER_RE = __import__("re").compile(r"(?:CWE-)?(\d+)", __import__("re").IGNORECASE)
+
+
+def _extract_cwe_number(value: Any) -> str:
+    """Extract the bare numeric CWE ID from values like
+    ``"CWE-78"``, ``"cwe-78"``, or ``"78"``. Returns ``""``
+    on None or unparseable input."""
+    if not value:
+        return ""
+    m = _CWE_NUMBER_RE.search(str(value))
+    return m.group(1) if m else ""
+
+
 def _stable_id(prefix: str, parts: Iterable[Any]) -> str:
     raw = "|".join(str(p) for p in parts if p not in (None, ""))
     digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:10]
@@ -1404,18 +1422,16 @@ def _outcome_matches_threat(data: dict[str, Any], threat: dict[str, Any]) -> boo
         str(threat.get("sink_id") or ""),
     }:
         return True
-    cwe = str(data.get("cwe_id") or "").lower()
+    cwe_num = _extract_cwe_number(data.get("cwe_id"))
     category = str(threat.get("category") or "").lower()
-    if cwe and (
-        ("78" in cwe and category == "command_execution")
-        or ("89" in cwe and category == "sql_injection")
-        or ("79" in cwe and "template" in category)
-        or ("22" in cwe and category == "path_traversal")
+    if cwe_num and (
+        (cwe_num == "78" and category == "command_execution")
+        or (cwe_num == "89" and category == "sql_injection")
+        or (cwe_num == "79" and "template" in category)
+        or (cwe_num == "22" and category == "path_traversal")
     ):
         return True
-    file = str(data.get("file") or "")
-    title = str(threat.get("title") or "")
-    return bool(file and file in title)
+    return False
 
 
 def _mermaid_id(value: str) -> str:

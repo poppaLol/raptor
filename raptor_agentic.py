@@ -192,6 +192,8 @@ def _materialise_threat_model_phase(
                 model, json_path, markdown_path,
                 expected_mtime=outcomes_mtime,
             )
+    except RuntimeError as e:
+        logger.warning(f"Threat model save refused (concurrent writer?): {e}")
     except Exception as e:
         logger.debug(f"Threat model verified-outcome linking skipped: {e}")
 

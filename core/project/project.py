@@ -23,6 +23,9 @@ PROJECTS_DIR = Path.home() / ".raptor" / "projects"
 DEFAULT_OUTPUT_BASE = Path("out/projects")
 
 
+_PROJECT_SCHEMA_VERSION = 3
+
+
 @dataclass
 class Project:
     """A RAPTOR project."""
@@ -73,9 +76,17 @@ class Project:
         if not isinstance(binaries, list):
             binaries = []
         try:
-            version = max(int(data.get("version", 3)), 3)
+            version = int(data.get("version", _PROJECT_SCHEMA_VERSION))
         except (TypeError, ValueError):
-            version = 3
+            version = _PROJECT_SCHEMA_VERSION
+        if version > _PROJECT_SCHEMA_VERSION:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Project file has schema version %d (current is %d); "
+                "fields beyond v%d will be lost on the next save",
+                version, _PROJECT_SCHEMA_VERSION, _PROJECT_SCHEMA_VERSION,
+            )
+        version = max(version, _PROJECT_SCHEMA_VERSION)
         # Back-compat: load v1/v2 files with new fields defaulted. The
         # next save upgrades the file to the current schema.
         return cls(

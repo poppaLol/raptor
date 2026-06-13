@@ -332,14 +332,15 @@ def test_save_model_refuses_concurrent_overwrite(tmp_path):
     save_model(model, json_path, md_path)
     stale_mtime = json_path.stat().st_mtime
 
-    # Concurrent writer changes the file (simulate via touch +
-    # rewrite).
-    import time
-    time.sleep(0.05)
+    # Concurrent writer changes the file. Use os.utime to
+    # guarantee a different mtime regardless of filesystem
+    # granularity (avoids flaky sleep-based approaches).
+    import os
     save_model(
         ThreatModel(project_name="demo", target="/x", notes="updated"),
         json_path, md_path,
     )
+    os.utime(json_path, (stale_mtime + 1, stale_mtime + 1))
 
     # First writer tries to save with the stale mtime — refused.
     import pytest
@@ -394,3 +395,63 @@ def test_project_threat_model_json_path_accepts_in_tree_relative(tmp_path):
     result = _project_threat_model_json_path(proj)
     assert result is not None
     assert result.is_relative_to(proj_out.resolve())
+
+
+# ---------------------------------------------------------------
+# CWE extraction and outcome matching — exact-match, not substring
+# ---------------------------------------------------------------
+
+
+def test_extract_cwe_number_parses_standard_formats():
+    from core.threat_model import _extract_cwe_number
+    assert _extract_cwe_number("CWE-78") == "78"
+    assert _extract_cwe_number("cwe-89") == "89"
+    assert _extract_cwe_number("22") == "22"
+    assert _extract_cwe_number(None) == ""
+    assert _extract_cwe_number("") == ""
+    assert _extract_cwe_number("not-a-cwe") == ""
+
+
+def test_outcome_matches_threat_uses_exact_cwe_not_substring():
+    from core.threat_model import _outcome_matches_threat
+    threat = {"id": "T-001", "category": "command_execution"}
+    # CWE-78 should match command_execution
+    assert _outcome_matches_threat({"cwe_id": "CWE-78"}, threat) is True
+    # CWE-178 / CWE-780 should NOT match (substring false positive)
+    assert _outcome_matches_threat({"cwe_id": "CWE-178"}, threat) is False
+    assert _outcome_matches_threat({"cwe_id": "CWE-780"}, threat) is False
+
+
+def test_outcome_matches_threat_does_not_false_match_on_short_filename():
+    from core.threat_model import _outcome_matches_threat
+    threat = {"id": "T-001", "title": "Unchecked flow to sink at a.py:10"}
+    # Pre-fix: file="a.py" matched any title containing "a.py".
+    # Post-fix: file-in-title fallback removed; no match without
+    # ID or CWE evidence.
+    assert _outcome_matches_threat({"file": "a.py"}, threat) is False
+
+
+def test_derive_domain_packs_does_not_false_positive_ai_on_django():
+    from core.threat_model import _derive_domain_packs
+    context_map = {
+        "frameworks": ["django"],
+        "languages": ["python"],
+        "entry_points": [{"name": "models.py admin"}],
+        "sink_details": [{"name": "agent dashboard view"}],
+        "sinks": [],
+    }
+    packs = _derive_domain_packs(context_map)
+    assert "ai" not in packs
+
+
+def test_derive_domain_packs_detects_real_ai_project():
+    from core.threat_model import _derive_domain_packs
+    context_map = {
+        "frameworks": ["langchain"],
+        "languages": ["python"],
+        "entry_points": [{"name": "llm prompt endpoint"}],
+        "sink_details": [{"name": "embedding store"}],
+        "sinks": [],
+    }
+    packs = _derive_domain_packs(context_map)
+    assert "ai" in packs

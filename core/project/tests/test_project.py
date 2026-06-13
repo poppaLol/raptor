@@ -50,6 +50,17 @@ class TestProject(unittest.TestCase):
         self.assertEqual(p.threat_model_path, "")
         self.assertEqual(p.threat_model_updated, "")
 
+    def test_future_version_warns_and_clamps(self):
+        with self.assertLogs("core.project.project", level="WARNING") as cm:
+            p = Project.from_dict({
+                "version": 99,
+                "name": "future",
+                "target": self.target_code,
+                "output_dir": "out/future",
+            })
+        self.assertEqual(p.version, 99)
+        self.assertTrue(any("schema version 99" in msg for msg in cm.output))
+
     def test_output_path(self):
         p = Project(name="test", target=self.target_code, output_dir="out/projects/test")
         self.assertEqual(p.output_path, Path("out/projects/test"))
