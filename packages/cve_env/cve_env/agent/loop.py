@@ -625,21 +625,23 @@ def _floor_cost(
     """Resolve the final ``total_cost_usd`` with all floors applied.
 
     Base = max(SDK-reported cost, continuation-summed cost, token estimate).
-    Adds a turns-based floor ONLY for an interrupted exit with no token usage —
-    the Claude Code session-auth + max_turns_reached case, where the SDK
-    under-reports cost AND ``usage`` is absent so the token estimate is 0 and a
-    multi-turn run would otherwise log ~$0. Gating leaves correctly-reported
-    clean runs and API-key (token-bearing) runs untouched (the turns floor only
-    ever raises). The turns floor is bounded by ``effective_max_cost_usd`` — a
-    run cannot have cost more than its budget cap (else it would have ended as
-    budget_exhausted), so the estimate never exceeds the cap.
+    Adds a turns-based floor for any INTERRUPTED exit (turn_cap / budget / error
+    / ...). Under Claude Code session auth the SDK under-reports cost on an
+    interrupted run AND ``usage`` is a tiny NONZERO stub (observed in=10, out=2),
+    so both the SDK cost and the token estimate collapse and a multi-turn run
+    would otherwise log ~$0. The floor is a ``max()`` bounded by
+    ``effective_max_cost_usd``, so it only ever RAISES: a correctly-reported
+    token-bearing (API-key) run keeps its real cost (its token estimate already
+    exceeds the conservative per-turn floor), and the floor never exceeds the
+    run's budget cap. Clean exits are excluded by ``_INTERRUPTED_EXIT_STATUSES``
+    membership (NOT by a token check — production never reports exactly 0 tokens).
     """
     cost = max(
         last_cost_usd,
         cont_cost_usd,
         estimate_cost_from_tokens(input_tokens, output_tokens, model),
     )
-    if status in _INTERRUPTED_EXIT_STATUSES and input_tokens == 0 and output_tokens == 0:
+    if status in _INTERRUPTED_EXIT_STATUSES:
         turns_floor = estimate_cost_from_turns(num_turns, model)
         if effective_max_cost_usd > 0:
             turns_floor = min(turns_floor, effective_max_cost_usd)

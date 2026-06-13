@@ -71,6 +71,40 @@ def test_floor_does_not_fire_for_clean_exit_statuses(status: str) -> None:
     assert floored == 0.01, f"{status!r} wrongly floored to {floored}"
 
 
+def test_floor_fires_with_tiny_nonzero_token_stub() -> None:
+    """RED: production Claude Code session auth emits a tiny NONZERO token stub
+    (observed in=10, out=2) on interrupted runs — NOT exactly 0. The turns floor
+    must still fire. The original ``input_tokens == 0 and output_tokens == 0``
+    gate is False for 10/2, so the floor was skipped and a 40-turn turn_cap
+    collapsed to a ~$0.0003 token estimate (the live CVE-2019-11043 bug)."""
+    floored = _floor_cost(
+        "turn_cap", num_turns=40, last_cost_usd=0.0, cont_cost_usd=0.0,
+        input_tokens=10, output_tokens=2, model=MODEL, effective_max_cost_usd=10.0,
+    )
+    tiny = estimate_cost_from_tokens(10, 2, MODEL)
+    assert floored > tiny, (
+        f"floor skipped on tiny token stub: {floored} ~= raw estimate {tiny}"
+    )
+    assert floored >= estimate_cost_from_tokens(40 * 1000, 0, MODEL), (
+        f"floor not turns-proportional with a nonzero stub: {floored}"
+    )
+
+
+def test_floor_does_not_inflate_real_high_token_interrupted_run() -> None:
+    """Regression: an interrupted run with REAL (large) token usage — the API-key
+    case — must keep its token-based cost, not be lowered OR inflated. The token
+    estimate already exceeds the conservative per-turn turns floor, so max() keeps
+    it. Guards against the de-gated floor over-charging token-bearing runs."""
+    big_in, big_out = 5_000_000, 500_000
+    base = estimate_cost_from_tokens(big_in, big_out, MODEL)
+    floored = _floor_cost(
+        "turn_cap", num_turns=5, last_cost_usd=0.0, cont_cost_usd=0.0,
+        input_tokens=big_in, output_tokens=big_out, model=MODEL,
+        effective_max_cost_usd=0.0,  # uncapped, so only the comparison decides
+    )
+    assert floored == base, f"real high-token cost altered: {floored} != {base}"
+
+
 def test_turn_cap_cost_floored_by_turns_when_no_token_usage(tmp_path: Path) -> None:
     """RED: a turn_cap run whose ResultMessage reports a low cost ($0.013),
     46 turns, and usage=None must NOT log a cost far below what 46 turns imply.
