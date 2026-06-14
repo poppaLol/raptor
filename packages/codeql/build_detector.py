@@ -9,7 +9,7 @@ build commands for CodeQL database creation.
 import os
 import re
 import subprocess
-from core.sandbox import run as _sandbox_run, run_trusted as _run_trusted
+from core.sandbox import run as _sandbox_run, run_trusted as _run_trusted, SandboxSetupError
 # _run_trusted: read-only tools (--version checks) — no namespace overhead.
 # Build-detection work compiles/executes untrusted content: each call site
 # passes target=output=<repo_path> so Landlock engages alongside seccomp +
@@ -149,27 +149,51 @@ class BuildDetector:
             },
         },
         "cpp": {
+            # Priority ordering rationale (lower = picked first
+            # via ``min()``): source-of-truth build descriptions
+            # win over generated artefacts. An autotools project
+            # ships ``configure.ac`` AND a generated ``Makefile``
+            # AND a generated ``configure`` — picking "make"
+            # because Makefile is present would tell the operator
+            # to run ``make`` on a clean checkout, which fails
+            # because Makefile carries host-specific paths that
+            # ``./configure`` would have populated. The
+            # source-of-truth markers (CMakeLists.txt /
+            # configure.ac / meson.build) are HAND-AUTHORED;
+            # everything else can be regenerated from them.
+            # ``make`` is the fallback when ONLY a Makefile
+            # exists (no higher-level source) — that's a real
+            # case (hand-written Makefile projects) but rare;
+            # losing the false positive on autotools projects is
+            # a much bigger win.
             "cmake": {
                 "files": ["CMakeLists.txt"],
                 "command": "cmake . && make",
                 "env_vars": {},
                 "priority": 1,
             },
-            "make": {
-                "files": ["Makefile", "makefile"],
-                "command": "make",
-                "env_vars": {},
-                "priority": 2,
-            },
             "autotools": {
-                "files": ["configure", "configure.ac"],
+                "files": ["configure.ac", "configure.in", "Makefile.am"],
                 "command": "./configure && make",
                 "env_vars": {},
-                "priority": 3,
+                "priority": 2,
             },
             "meson": {
                 "files": ["meson.build"],
                 "command": "meson setup builddir && meson compile -C builddir",
+                "env_vars": {},
+                "priority": 3,
+            },
+            "make": {
+                # Last-resort: a hand-written Makefile with no
+                # higher-level source. Generated Makefiles (from
+                # autotools / cmake / meson) get classified by
+                # those entries above instead. Note we DON'T
+                # include ``configure`` here — its presence
+                # implies autotools regardless of which file is
+                # source vs generated.
+                "files": ["Makefile", "makefile"],
+                "command": "make",
                 "env_vars": {},
                 "priority": 4,
             },
@@ -1247,6 +1271,8 @@ print(f"Compiled {{ok}}/{{total}} files ({{fail}} failed)")
                 tail = stderr_lines[-1] if stderr_lines else "(no stderr)"
                 logger.warning(f"Build script crashed: {tail}")
                 return None
+        except SandboxSetupError:
+            raise  # sandbox isolation could not engage — fail loud, never mask as a benign result
         except (subprocess.TimeoutExpired, Exception) as e:
             logger.warning(f"Build script never ran ({e!r}) — treating as 'didn't run'")
             return None

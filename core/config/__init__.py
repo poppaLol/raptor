@@ -99,7 +99,10 @@ class RaptorConfig:
         # to UNCERTAIN on most findings — informational-only axes
         # (axis 1 alias scan, axis 6 build flags, axis 8 validation-
         # after-overflow) still work via pure-Python paths.
-        "coccinelle":   {"binary": "spatch",    "severity": "degrades", "affects": "source_intel (axes 1-7 verdict-active)"},
+        # ``affects`` is operator-facing — names user commands ("/codeql,
+        # /agentic"), not internal subsystem axes. ``source_intel`` /
+        # ``verdict-active`` mean nothing to an operator reading /doctor.
+        "coccinelle":   {"binary": "spatch",    "severity": "degrades", "affects": "/codeql, /agentic (C/C++ semantic-patch verification)"},
         "gdb":          {"binary": "gdb",       "severity": "required", "affects": "/crash-analysis, /fuzz"},
         "rr":           {"binary": "rr",        "severity": "degrades", "affects": "/crash-analysis"},
         "semgrep":      {"binary": "semgrep",   "group": "scanner",     "affects": "/scan, /agentic"},
@@ -210,6 +213,16 @@ class RaptorConfig:
         :meth:`packages.codeql.CodeQLTunables.from_tuning`.
         """
         return cls._tuning().codeql_max_disk_cache_mb
+
+    @classproperty
+    def CODEQL_ENABLED(cls):
+        """Persistent CodeQL toggle from ``tuning.json``.
+
+        When False, ``/agentic`` no longer injects ``--codeql`` by
+        default. CLI flags still override: ``--codeql`` forces ON,
+        ``--no-codeql`` forces OFF, regardless of this config.
+        """
+        return cls._tuning().codeql_enabled
 
     # CodeQL DB cache: grace period before _evict_stale_canonical evicts
     # a canonical that has no metadata yet. The promote sequence has a

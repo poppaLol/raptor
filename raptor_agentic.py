@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.json import load_json, save_json
 from core.config import RaptorConfig
 from core.logging import get_logger
+from core.sandbox import SANDBOX_ENGAGE_EXIT_CODE, SandboxSetupError
 from core.run.safe_io import safe_run_mkdir
 from core.schema_constants import VULN_TYPE_TO_CWE as _CWE_FROM_VULN_TYPE
 from core.security.cc_trust import check_repo_claude_trust, set_trust_override
@@ -978,6 +979,24 @@ def _build_fuzz_phase_summary(fuzzing_result: dict | None, fuzz_out: Path | None
 
 
 
+def _build_completion_manifest(orch_meta, import_result, import_sarif_files,
+                               reanalyze_dir=None):
+    manifest = {
+        "models": orch_meta.get("fired_models", []),
+    }
+    if import_result and import_result.stats.total_imported:
+        from core.sarif.import_normalizer import import_provenance_block
+        tools = sorted({f.get("tool", "external") for f in import_result.findings})
+        manifest["sarif_import"] = import_provenance_block(
+            import_result,
+            sarif_files=[Path(f).name for f in import_sarif_files],
+            tools=tools,
+        )
+    if reanalyze_dir:
+        manifest["reanalysis_of"] = str(reanalyze_dir)
+    return manifest
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="RAPTOR Agentic Security Testing - Scan, Analyse, Exploit, Patch",
@@ -1041,6 +1060,40 @@ Examples:
             "launch time. When the script is invoked directly without "
             "the wrapper, RAPTOR_CALLER_DIR is unset and --repo is "
             "required)."
+        ),
+    )
+    parser.add_argument(
+        "--sarif", action="append", default=None, metavar="FILE",
+        help=(
+            "Import external SARIF file(s) instead of scanning. Repeatable. "
+            "Findings are normalized against the source tree at --repo "
+            "(URI rebasing, snippet synthesis, CWE inference). "
+            "Skips the scan phase unless --also-scan is set."
+        ),
+    )
+    parser.add_argument(
+        "--also-scan", action="store_true",
+        help=(
+            "When --sarif is provided, also run RAPTOR's own scanners "
+            "(Semgrep / CodeQL) and merge the results with imported "
+            "findings. Without this flag, --sarif replaces the scan step."
+        ),
+    )
+    parser.add_argument(
+        "--sarif-out", metavar="FILE",
+        help=(
+            "Write enriched SARIF after analysis. Each result carries "
+            "properties.raptor with RAPTOR's verdict, reachability, "
+            "exploitability score, and reasoning. Binary-oracle-suppressed "
+            "findings get standard SARIF suppressions."
+        ),
+    )
+    parser.add_argument(
+        "--reanalyze", metavar="DIR",
+        help=(
+            "Re-run analysis on a previous run's output directory. "
+            "Reads .raptor-run.json to recover target path and SARIF files, "
+            "skips scanning. Equivalent to --sarif <previous SARIFs> --repo <previous target>."
         ),
     )
     parser.add_argument("--policy-groups", default="all", help="Comma-separated policy groups (default: all)")
@@ -1408,6 +1461,42 @@ Examples:
     if _target_kind != "auto":
         os.environ[RaptorConfig.ENV_TARGET_KIND] = _target_kind
 
+    # --reanalyze: seed --sarif and --repo from a previous run's metadata
+    if getattr(args, "reanalyze", None):
+        from core.run.metadata import load_run_metadata
+        reanalyze_dir = Path(args.reanalyze).resolve()
+        args.reanalyze = str(reanalyze_dir)
+        if not reanalyze_dir.is_dir():
+            parser.error(f"--reanalyze directory does not exist: {args.reanalyze}")
+        prev_meta = load_run_metadata(reanalyze_dir)
+        if not prev_meta:
+            parser.error(f"--reanalyze: no .raptor-run.json in {reanalyze_dir}")
+        prev_target = prev_meta.get("target_path")
+        if not prev_target:
+            parser.error("--reanalyze: previous run has no target_path in metadata")
+        if args.repo and str(Path(args.repo).resolve()) != str(Path(prev_target).resolve()):
+            logger.warning(
+                "--reanalyze: explicit --repo %s differs from previous run's "
+                "target %s — using --repo (SARIF may not match)",
+                args.repo, prev_target,
+            )
+        if not args.repo:
+            args.repo = prev_target
+        prev_sarif = []
+        for s in prev_meta.get("extra", {}).get("sarif_files", []):
+            candidate = reanalyze_dir / Path(s).name
+            if candidate.exists():
+                prev_sarif.append(str(candidate))
+            else:
+                logger.warning("--reanalyze: SARIF file missing: %s", candidate)
+        if not prev_sarif:
+            for f in sorted(reanalyze_dir.glob("*.sarif")):
+                prev_sarif.append(str(f))
+        if not prev_sarif:
+            parser.error(f"--reanalyze: no SARIF files found in {reanalyze_dir}")
+        args.sarif = (args.sarif or []) + prev_sarif
+        logger.info("--reanalyze: re-using %d SARIF files from %s", len(prev_sarif), reanalyze_dir)
+
     if not args.repo:
         parser.error("--repo is required (or launch via `raptor` from the target directory)")
     if not Path(args.repo).exists():
@@ -1508,6 +1597,10 @@ Examples:
                 logger.error(f"Git init failed: {result.stderr}")
                 sys.exit(1)
 
+        except SandboxSetupError:
+            # Sandbox couldn't engage — not a git error. Propagate to the
+            # top-level handler so the operator gets the actionable message.
+            raise
         except subprocess.TimeoutExpired:
             print("  Git initialization timed out")
             logger.error("Git init timeout")
@@ -1775,20 +1868,21 @@ Examples:
     threat_candidate_sarif = threat_model_phase.get("candidate_sarif")
     if threat_candidate_sarif and Path(threat_candidate_sarif).exists():
         all_sarif_files.append(Path(threat_candidate_sarif))
+    import_sarif_files: list = getattr(args, "sarif", None) or []
+
+    if args.also_scan and not import_sarif_files:
+        logger.warning("--also-scan has no effect without --sarif; ignoring")
+
+    # When --sarif is provided without --also-scan, skip RAPTOR's own
+    # scanners entirely — the imported SARIF replaces the scan step.
+    skip_scan = bool(import_sarif_files) and not args.also_scan
 
     # Launch scanners in parallel when both are enabled
-    run_semgrep = not args.codeql_only
-    run_codeql = (args.codeql or args.codeql_only) and not args.no_codeql
+    run_semgrep = not args.codeql_only and not skip_scan
+    run_codeql = (args.codeql or args.codeql_only) and not args.no_codeql and not skip_scan
 
-    # Defensive guard for the "no scanners enabled" case. The
-    # mutex group on ``--codeql / --codeql-only / --no-codeql``
-    # makes this structurally unreachable today (you can't pass
-    # both ``--codeql-only`` and ``--no-codeql`` simultaneously),
-    # but if either resolution rule above ever shifts — or a
-    # caller mutates ``args`` between argparse and here — we don't
-    # want the pipeline silently walking to completion with
-    # zero findings and reporting "clean". Bail loudly instead.
-    if not (run_semgrep or run_codeql):
+    # Defensive guard for the "no scanners enabled" case.
+    if not skip_scan and not (run_semgrep or run_codeql):
         print(
             "\n✗ Both Semgrep and CodeQL are disabled — nothing to scan.\n"
             "  Re-run without --codeql-only / --no-codeql, or pass only one "
@@ -1957,6 +2051,20 @@ Examples:
             if not run_codeql:
                 sys.exit(1)
 
+        if rc == SANDBOX_ENGAGE_EXIT_CODE:
+            # The semgrep subprocess reported the sandbox could not engage
+            # (it already printed the actionable message). Abort the whole
+            # run loud — never fall through into LLM analysis on a silent
+            # "0 findings". Kill the sibling codeql child first.
+            if codeql_proc and codeql_proc.poll() is None:
+                codeql_proc.kill()
+            raise SandboxSetupError(
+                "the semgrep scan subprocess reported the sandbox could not "
+                f"engage (exit {SANDBOX_ENGAGE_EXIT_CODE}); see its output above",
+                "re-run with --sandbox network-only (or --sandbox none). "
+                "RAPTOR will not silently downgrade.",
+            )
+
         if rc in (0, 1):
             # The scanner now writes into the run dir's scan/ subdir (--out
             # above), so its outputs — combined.sarif, scan_metrics.json, and
@@ -2006,6 +2114,16 @@ Examples:
             rc = -1
             print("❌ CodeQL scan timed out (30m)")
             logger.error("CodeQL scan timed out")
+
+        if rc == SANDBOX_ENGAGE_EXIT_CODE:
+            # CodeQL subprocess reported the sandbox could not engage —
+            # abort loud rather than continuing with partial findings.
+            raise SandboxSetupError(
+                "the codeql scan subprocess reported the sandbox could not "
+                f"engage (exit {SANDBOX_ENGAGE_EXIT_CODE}); see its output above",
+                "re-run with --sandbox network-only (or --sandbox none). "
+                "RAPTOR will not silently downgrade.",
+            )
 
         if rc != 0:
             if all_sarif_files:
@@ -2117,6 +2235,48 @@ Examples:
         if not source_scan_empty:
             logger.info("raptor-sca not installed — skipping SCA phase")
 
+    # ---- External SARIF import ----
+    import_result = None
+    if import_sarif_files:
+        from core.sarif.import_normalizer import (
+            findings_to_sarif,
+            format_import_summary,
+            normalize_imported_findings,
+        )
+        from core.sarif.parser import parse_sarif_findings
+
+        print("\n" + "=" * 70)
+        print("SARIF IMPORT")
+        print("=" * 70)
+
+        imported_findings = []
+        for sf in import_sarif_files:
+            sf_path = Path(sf)
+            if not sf_path.exists():
+                print(f"  ✗ SARIF file not found: {sf}", file=sys.stderr)
+                continue
+            findings = parse_sarif_findings(sf_path)
+            logger.info("Parsed %d findings from %s", len(findings), sf_path.name)
+            imported_findings.extend(findings)
+
+        if imported_findings:
+            import_result = normalize_imported_findings(
+                imported_findings,
+                original_repo_path,
+            )
+            print(format_import_summary(
+                import_result,
+                [Path(f).name for f in import_sarif_files],
+            ))
+            normalized_sarif = findings_to_sarif(import_result.findings)
+            normalized_path = out_dir / "imported-normalized.sarif"
+            import json as _json
+            normalized_path.write_text(_json.dumps(normalized_sarif, indent=2))
+            all_sarif_files.append(normalized_path)
+        elif not all_sarif_files:
+            print("\n✗ No findings in imported SARIF and no scan results")
+            sys.exit(1)
+
     if not all_sarif_files:
         print("\n❌ No SARIF files generated from scanning")
         sys.exit(1)
@@ -2130,6 +2290,11 @@ Examples:
                       + codeql_metrics.get('total_findings', 0)
                       + sca_findings_count
                       + threat_model_findings_count)
+    imported_findings_count = import_result.stats.total_imported if import_result else 0
+    total_findings = (semgrep_metrics.get('total_findings', 0)
+                      + codeql_metrics.get('total_findings', 0)
+                      + sca_findings_count
+                      + imported_findings_count)
     scan_metrics = {
         'total_findings': total_findings,
         'total_files_scanned': semgrep_metrics.get('total_files_scanned', 0),
@@ -2139,6 +2304,12 @@ Examples:
         'sca': sca_metrics,
         'threat_model': threat_model_phase,
     }
+    if import_result:
+        scan_metrics['import'] = {
+            'total_imported': import_result.stats.total_imported,
+            'findings_skipped': import_result.stats.findings_skipped,
+            'cwe_inferred': import_result.stats.cwe_inferred,
+        }
 
     sarif_files = all_sarif_files
 
@@ -2151,6 +2322,8 @@ Examples:
         print(f"  SCA: {sca_findings_count} findings")
     if threat_model_findings_count:
         print(f"  Threat model: {threat_model_findings_count} candidates")
+    if imported_findings_count:
+        print(f"  Imported: {imported_findings_count} findings")
     print(f"SARIF files: {len(sarif_files)}")
 
     # ========================================================================
@@ -2219,6 +2392,48 @@ Examples:
         external_llm=llm_env.external_llm,
         sca_findings_path=sca_findings_path,
     )
+
+    # Enrichment summary — pre-LLM visibility of mechanical enrichments
+    _enrichment_lines = []
+    if validation_result and validation_result.get("completed"):
+        dupes = validation_result.get("duplicates_removed", 0)
+        if dupes > 0:
+            _enrichment_lines.append(f"  Dedup: {dupes} duplicates removed")
+        sca_m = validation_result.get("sca_merged", 0)
+        if sca_m > 0:
+            _enrichment_lines.append(f"  SCA: {sca_m} dependency findings merged")
+    if import_result and import_result.stats.total_imported > 0:
+        stats = import_result.stats
+        _enrichment_lines.append(
+            f"  SARIF import: {stats.total_imported} findings "
+            f"({stats.cwe_inferred} CWEs inferred, "
+            f"{stats.findings_skipped} skipped)"
+        )
+        sca_tagged = sum(
+            1 for f in import_result.findings if f.get("source_type") == "dependency"
+        )
+        if sca_tagged > 0:
+            _enrichment_lines.append(f"  SCA tagged: {sca_tagged} imported findings")
+    if reachability_prepass_result and reachability_prepass_result.ran:
+        _enrichment_lines.append(
+            f"  Reachability: {reachability_prepass_result.marked_count} "
+            f"dead-code marks"
+        )
+    suppression_file = out_dir / "suppressions.jsonl"
+    if suppression_file.exists():
+        with suppression_file.open() as _fh:
+            suppressed = sum(1 for _ in _fh)
+        if suppressed > 0:
+            _enrichment_lines.append(
+                f"  Binary oracle: {suppressed} findings suppressed (absent)"
+            )
+    if _enrichment_lines:
+        print("\n" + "-" * 40)
+        print("ENRICHMENT SUMMARY (pre-LLM)")
+        print("-" * 40)
+        for line in _enrichment_lines:
+            print(line)
+        print(f"  Findings entering LLM analysis: {validated_findings}")
 
     # ========================================================================
     # PHASE 3: AUTONOMOUS ANALYSIS
@@ -2292,6 +2507,17 @@ Examples:
             analysis_cmd, "Preparing findings for analysis",
             timeout=args.phase_timeout,
         )
+
+        if rc == SANDBOX_ENGAGE_EXIT_CODE:
+            # The analysis subprocess reported the sandbox could not engage.
+            # Abort loud rather than degrading the analysis phase to an
+            # empty `analysis = {}` (a silent "produced no output").
+            raise SandboxSetupError(
+                "the analysis subprocess reported the sandbox could not "
+                f"engage (exit {SANDBOX_ENGAGE_EXIT_CODE}); see its output above",
+                "re-run with --sandbox network-only (or --sandbox none). "
+                "RAPTOR will not silently downgrade.",
+            )
 
         # Parse analysis results
         analysis_report = autonomous_out / "autonomous_analysis_report.json"
@@ -2502,6 +2728,7 @@ Examples:
             "exploits_directory": str(autonomous_out / "exploits") if autonomous_out else None,
             "patches_directory": str(autonomous_out / "patches") if autonomous_out else None,
             "exploit_feasibility": str(out_dir / "exploit_feasibility.txt") if mitigation_result else None,
+            "enriched_sarif": None,  # populated after --sarif-out write
         }
     }
 
@@ -2712,6 +2939,25 @@ Examples:
         orch_report_path = out_dir / "orchestrated_report.json"
         if orch_report_path.exists():
             save_json(orch_report_path, orchestration_result)
+
+    # Enriched SARIF output
+    sarif_out_path = getattr(args, "sarif_out", None)
+    if sarif_out_path:
+        from core.sarif.enriched_writer import write_enriched_sarif
+        analysed_results = (
+            orchestration_result.get("results", [])
+            if orchestration_result else []
+        )
+        if analysed_results:
+            sarif_out_resolved = Path(sarif_out_path)
+            if not sarif_out_resolved.is_absolute():
+                sarif_out_resolved = out_dir / sarif_out_resolved
+            n = write_enriched_sarif(analysed_results, sarif_out_resolved)
+            print(f"\n✓ Enriched SARIF written: {sarif_out_resolved} ({n} findings)")
+            final_report["outputs"]["enriched_sarif"] = str(sarif_out_resolved)
+            save_json(report_file, final_report)
+        else:
+            logger.warning("--sarif-out: no analysed findings to write")
 
     # Findings funnel
     if validation_result:
@@ -3108,13 +3354,10 @@ Examples:
             "analysis_models": orch_meta.get("analysis_models", []),
             "aggregate_models": orch_meta.get("aggregate_models", []),
             "aggregated": orch_meta.get("aggregated", False),
-        }, manifest={
-            # Only the in-process fact the lifecycle can't see for itself: the
-            # models that fired. Engines (from the scan phase) and
-            # deterministically_reproducible=False (agentic is LLM-mediated)
-            # are filled uniformly by core.run.complete_run.
-            "models": orch_meta.get("fired_models", []),
-        })
+        }, manifest=_build_completion_manifest(
+            orch_meta, import_result, import_sarif_files,
+            reanalyze_dir=getattr(args, "reanalyze", None),
+        ))
     except Exception as e:
         logger.debug(f"Run metadata: {e}")  # Optional — don't fail the pipeline
 
@@ -3384,4 +3627,13 @@ def _postprocess_findings(results):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SandboxSetupError as e:
+        # Fail loud with the actionable message, not a traceback — the run
+        # did NOT analyse anything, so never let it look like a clean pass.
+        print(
+            f"\nRAPTOR: run aborted — sandbox isolation could not engage.\n{e}",
+            file=sys.stderr,
+        )
+        sys.exit(SANDBOX_ENGAGE_EXIT_CODE)
