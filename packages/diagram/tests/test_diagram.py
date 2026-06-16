@@ -352,6 +352,66 @@ class TestContextMap:
         # HTML-escaped angle brackets should be present
         assert "&lt;" in out or "&gt;" in out
 
+    def test_entry_point_name_used_when_route_fields_absent(self):
+        data = {
+            "entry_points": [
+                {"id": "EP-001", "name": "ap_read_request", "file": "server/protocol.c", "line": 803,
+                 "auth_required": False}
+            ],
+        }
+        out = gen_context_map(data)
+        assert "ap_read_request [PUBLIC]" in out
+        assert "? [PUBLIC]" not in out
+
+    def test_html_entities_are_unescaped_before_mermaid_sanitizing(self):
+        data = {
+            "entry_points": [{"id": "EP-001", "name": "ap_read_request"}],
+            "sink_details": [
+                {"id": "SINK-001", "operation": "ap_get_client_block -&gt; proxy body forwarding",
+                 "reaches_from": ["EP-001"]}
+            ],
+        }
+        out = gen_context_map(data)
+        assert "-&gt;" not in out
+        assert "-> proxy body forwarding" in out
+
+    def test_duplicate_boundary_edges_are_deduplicated(self):
+        data = {
+            "entry_points": [{"id": "EP-001", "name": "route"}],
+            "boundary_details": [
+                {"id": "TB-001", "boundary": "routing", "covers": ["EP-001", "EP-001"]},
+                {"id": "TB-002", "boundary": "routing again", "covers": ["EP-001"]},
+            ],
+            "sink_details": [
+                {"id": "SINK-001", "operation": "redirect", "reaches_from": ["EP-001", "EP-001"]},
+            ],
+        }
+        out = gen_context_map(data)
+        assert out.count("EP-001 --> TB-001") == 1
+        assert out.count("TB-001 --> SINK-001") == 1
+        assert out.count("TB-002 --> SINK-001") == 1
+
+    def test_remote_context_filters_local_support_tool_sinks(self):
+        data = {
+            "meta": {"app_type": "http_server", "target": "/src/httpd-2.0.35"},
+            "entry_points": [{"id": "EP-001", "name": "ap_read_request"}],
+            "sink_details": [
+                {"id": "SINK-001", "operation": "strcpy(connecthost, proxyhost)",
+                 "file": "support/ab.c", "line": 1124, "reaches_from": []},
+                {"id": "SINK-002", "operation": "cgi_environment",
+                 "file": "server/util_script.c", "line": 369, "reaches_from": ["EP-001"]},
+            ],
+            "unchecked_flows": [
+                {"entry_point": "EP-001", "sink": "SINK-001", "missing_boundary": "local CLI"},
+                {"entry_point": "EP-001", "sink": "SINK-002", "missing_boundary": "remote flow"},
+            ],
+        }
+        out = gen_context_map(data)
+        assert "support/ab.c" not in out
+        assert "SINK-001" not in out
+        assert "server/util_script.c" in out
+        assert "SINK-002" in out
+
     def test_sanitized_context_map_is_still_usable_mermaid(self):
         data = {
             "entry_points": [
@@ -1018,6 +1078,38 @@ class TestRenderer:
         assert "Context Map" in out
         assert "testapp" in out
         assert "```mermaid" in out
+
+    def test_graph_context_map_is_rendered_before_flat_attack_surface(self, tmp_path):
+        attack_surface = {
+            "sources": [{"type": "http_route", "entry": "GET /flat"}],
+            "sinks": [{"type": "db_query", "location": "src/db.py:10"}],
+            "trust_boundaries": [],
+        }
+        graph_map = {
+            "entry_points": [{"id": "EP-001", "name": "ap_read_request"}],
+            "sink_details": [{"id": "SINK-001", "operation": "cgi_environment"}],
+        }
+        self._make_out_dir(tmp_path, {
+            "attack-surface.json": attack_surface,
+            "context-map.graph.json": graph_map,
+        })
+        out = render_directory(tmp_path)
+        assert out.index("Context Map from Graph Memory") < out.index("Attack Surface (Stage B)")
+        assert "_Source: `context-map.graph.json`_" in out
+
+    def test_renderer_target_metadata_filters_support_tools(self, tmp_path):
+        attack_surface = {
+            "sources": [{"type": "http_route", "entry": "GET /"}],
+            "sinks": [
+                {"type": "unsafe_c_string_copy", "location": "support/ab.c:1124 strcpy(connecthost, proxyhost)"},
+                {"type": "cgi_environment", "location": "server/util_script.c:369 QUERY_STRING from r->args"},
+            ],
+            "trust_boundaries": [],
+        }
+        self._make_out_dir(tmp_path, {"attack-surface.json": attack_surface})
+        out = render_directory(tmp_path, target="httpd-2.0.35")
+        assert "support/ab.c" not in out
+        assert "server/util_script.c" in out
 
     def test_render_directory_with_flow_traces(self, tmp_path):
         self._make_out_dir(tmp_path, {"flow-trace-EP-001.json": FLOW_TRACE_DATA})

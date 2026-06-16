@@ -522,7 +522,7 @@ def load_understand_graph_context(
 
     # Persist the rebuilt view as a run-local derived artefact for auditability.
     save_json(validate_dir / "context-map.graph.json", context_map, mode=0o600)
-    surface_stats = _merge_attack_surface(context_map, validate_dir, graph_path.parent)
+    surface_stats = _merge_attack_surface(context_map, validate_dir, graph_path)
     map_smt_stats = _import_unchecked_flow_conditions(context_map, validate_dir)
 
     summary.update({
@@ -1364,10 +1364,17 @@ def _merge_attack_surface(
     # Populate or merge attack-surface.json from context-map data.
     surface_path = validate_dir / "attack-surface.json"
 
-    # Extract the three required keys from the context map
+    # Extract both the legacy Stage B shape and the richer /understand
+    # context-map shape. Older flows read sources/sinks/trust_boundaries;
+    # newer graph-backed diagrams and prompt primers consume
+    # entry_points/boundary_details/sink_details/unchecked_flows.
     new_sources = context_map.get("sources", [])
     new_sinks = context_map.get("sinks", [])
     new_boundaries = context_map.get("trust_boundaries", [])
+    new_entry_points = context_map.get("entry_points", [])
+    new_boundary_details = context_map.get("boundary_details", [])
+    new_sink_details = context_map.get("sink_details", [])
+    new_unchecked_flows = context_map.get("unchecked_flows", [])
 
     # Annotate trust boundaries with gap information from boundary_details
     gap_count = 0
@@ -1392,22 +1399,54 @@ def _merge_attack_surface(
         merged_boundaries = _merge_list_by_key(
             existing.get("trust_boundaries", []), new_boundaries, key="boundary"
         )
+        merged_entry_points = _merge_list_by_key(
+            existing.get("entry_points", []), new_entry_points, key="id"
+        )
+        merged_boundary_details = _merge_list_by_key(
+            existing.get("boundary_details", []), new_boundary_details, key="id"
+        )
+        merged_sink_details = _merge_list_by_key(
+            existing.get("sink_details", []), new_sink_details, key="id"
+        )
+        merged_unchecked_flows = _merge_list_by_key(
+            existing.get("unchecked_flows", []), new_unchecked_flows, key="id"
+        )
         # Only rewrite if the merge added something
         changed = (len(merged_sources) != len(existing.get("sources", []))
                    or len(merged_sinks) != len(existing.get("sinks", []))
-                   or len(merged_boundaries) != len(existing.get("trust_boundaries", [])))
+                   or len(merged_boundaries) != len(existing.get("trust_boundaries", []))
+                   or len(merged_entry_points) != len(existing.get("entry_points", []))
+                   or len(merged_boundary_details) != len(existing.get("boundary_details", []))
+                   or len(merged_sink_details) != len(existing.get("sink_details", []))
+                   or len(merged_unchecked_flows) != len(existing.get("unchecked_flows", [])))
     else:
         merged_sources = new_sources
         merged_sinks = new_sinks
         merged_boundaries = new_boundaries
-        changed = bool(new_sources or new_sinks or new_boundaries)
+        merged_entry_points = new_entry_points
+        merged_boundary_details = new_boundary_details
+        merged_sink_details = new_sink_details
+        merged_unchecked_flows = new_unchecked_flows
+        changed = bool(
+            new_sources or new_sinks or new_boundaries
+            or new_entry_points or new_boundary_details
+            or new_sink_details or new_unchecked_flows
+        )
 
     if changed:
+        if understand_dir.is_file():
+            imported_from = understand_dir
+        else:
+            imported_from = understand_dir / "context-map.json"
         attack_surface = {
             "sources": merged_sources,
             "sinks": merged_sinks,
             "trust_boundaries": merged_boundaries,
-            "_imported_from": str(understand_dir / "context-map.json"),
+            "entry_points": merged_entry_points,
+            "boundary_details": merged_boundary_details,
+            "sink_details": merged_sink_details,
+            "unchecked_flows": merged_unchecked_flows,
+            "_imported_from": str(imported_from),
             "_imported_at": datetime.now(timezone.utc).isoformat(),
         }
         # mode=0o600 — attack-surface JSON lists entry points, trust

@@ -15,11 +15,28 @@ from . import context_map, flow_trace, attack_tree, attack_paths, hypotheses, fi
 
 
 _FLOW_TRACE_GLOB = "flow-trace-*.json"
+_GRAPH_FILENAME = "raptor.graph.sqlite"
 
 
 def _section(title: str, body: str, level: int = 2) -> str:
     heading = "#" * level
     return f"{heading} {title}\n\n{body}\n"
+
+
+def _graph_path_for_directory(out_dir: Path) -> Optional[Path]:
+    direct = out_dir / "graph" / _GRAPH_FILENAME
+    if direct.exists():
+        return direct
+
+    checklist = _load_json(out_dir / "checklist.json") if (out_dir / "checklist.json").exists() else None
+    target_path = checklist.get("target_path") if isinstance(checklist, dict) else None
+    if not target_path:
+        return None
+
+    from core.understand_graph import graph_path_for_run
+
+    graph_path = graph_path_for_run(out_dir, target_path)
+    return graph_path if graph_path.exists() else None
 
 
 def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
@@ -72,9 +89,11 @@ def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
         except Exception as exc:
             sections.append(_section("Findings Summary", f"> Could not render: {exc}"))
 
-    # --- Context map / attack surface ---
+    # --- Context map / graph memory / attack surface ---
+    context_map_rendered = False
     for fname, title in [
         ("context-map.json", "Context Map, Entry Points, Trust Boundaries, Sinks"),
+        ("context-map.graph.json", "Context Map from Graph Memory"),
         ("attack-surface.json", "Attack Surface (Stage B)"),
     ]:
         fpath = out_dir / fname
@@ -84,9 +103,14 @@ def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
             data = _load_json(fpath)
             if data is None:
                 raise ValueError("failed to parse JSON")
+            if isinstance(data, dict) and "meta" not in data and target:
+                data = dict(data)
+                data["meta"] = {"target": target}
             diagram = context_map.generate(data)
             body = f"_Source: `{fname}`_\n\n```mermaid\n{diagram}\n```"
             sections.append(_section(title, body))
+            if fname.startswith("context-map"):
+                context_map_rendered = True
             # Per-entry forward-reachable diagrams (substrate-derived
             # call closure from /understand --map's MAP-5b step).
             # Only fires for context-map.json today; attack-surface.json
@@ -120,11 +144,11 @@ def render_directory(out_dir: Path, target: Optional[str] = None) -> str:
         except Exception as exc:
             sections.append(_section(title, f"> Could not render `{fname}`: {exc}"))
 
-    if not (out_dir / "context-map.json").exists():
+    if not context_map_rendered:
         try:
-            from core.understand_graph import build_context_map, graph_path_for_run
-            graph_path = graph_path_for_run(out_dir)
-            if graph_path.exists():
+            from core.understand_graph import build_context_map
+            graph_path = _graph_path_for_directory(out_dir)
+            if graph_path and graph_path.exists():
                 data, stale = build_context_map(graph_path)
                 if data:
                     diagram = context_map.generate(data)
