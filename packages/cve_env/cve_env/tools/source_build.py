@@ -80,9 +80,9 @@ def _env_int(name: str, default: int) -> int:
 # tarball is well under 1 GB), so legitimate builds never trip them; an
 # over-cap fetch returns None and the cascade falls back to git clone — work is
 # never blocked. All env-configurable for the rare giant-monorepo CVE.
-_MAX_TARBALL_BYTES = _env_int("CVE_ENV_MAX_TARBALL_BYTES", 8 * 1024**3)  # 8 GiB
+_MAX_TARBALL_BYTES = _env_int("CVE_ENV_MAX_TARBALL_BYTES", 512 * 1024**2)  # 512 MiB
 _MAX_JSON_BYTES = _env_int("CVE_ENV_MAX_JSON_BYTES", 64 * 1024 * 1024)  # 64 MiB
-_MAX_EXTRACT_BYTES = _env_int("CVE_ENV_MAX_EXTRACT_BYTES", 50 * 1024**3)  # 50 GiB
+_MAX_EXTRACT_BYTES = _env_int("CVE_ENV_MAX_EXTRACT_BYTES", 2 * 1024**3)  # 2 GiB
 _MAX_EXTRACT_MEMBERS = _env_int("CVE_ENV_MAX_EXTRACT_MEMBERS", 500_000)
 
 _DOCKERFILE_LOCATIONS: tuple[str, ...] = (

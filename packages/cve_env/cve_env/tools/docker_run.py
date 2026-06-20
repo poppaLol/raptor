@@ -323,6 +323,9 @@ def docker_run(
         cmd.extend(["--cap-add", cap])
     for opt in DEFAULT_SECURITY_OPT:
         cmd.extend(["--security-opt", opt])
+    cmd.extend(["--memory", "4g", "--memory-swap", "4g"])
+    cmd.extend(["--cpus", "2"])
+    cmd.extend(["--pids-limit", "512"])
     cmd.extend(["-p", f"127.0.0.1::{container_port}"])
     cmd.extend(["--label", f"{OWNER_LABEL}=cve-env"])
     if cve_id:
@@ -485,11 +488,38 @@ def docker_run(
     )
 
 
+def _is_owned_container(container_id: str) -> bool:
+    """Return True only if the container carries the ``cve-env.owner=cve-env`` label.
+
+    Prevents the agent from stopping arbitrary host containers.
+    """
+    outcome = run_with_timeout(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            f'{{{{index .Config.Labels "{OWNER_LABEL}"}}}}',
+            container_id,
+        ],
+        timeout=5.0,
+    )
+    return (
+        outcome.returncode == 0
+        and (outcome.stdout or "").strip() == "cve-env"
+    )
+
+
 def docker_stop(container_id: str) -> None:
     """Stop + remove ``container_id``. Errors are swallowed (best effort).
 
     ``run_with_timeout`` catches all transport failures (including timeouts)
     so the "errors are swallowed" contract holds.
     """
+    if not _is_owned_container(container_id):
+        logger.warning(
+            "docker_stop: container %s is not owned by cve-env; skipping",
+            container_id,
+        )
+        return
     run_with_timeout(["docker", "stop", container_id], timeout=30)
     run_with_timeout(["docker", "rm", "-f", container_id], timeout=30)

@@ -91,9 +91,7 @@ def sanitize_dockerfile(text: str) -> str:
     if not text:
         return text
 
-    text = re.sub(r"\\{4,}", r"\\", text)
-    text = re.sub(r"\\\\\\\\", r"\\", text)
-    text = re.sub(r"\\\\", r"\\", text)
+    text = re.sub(r"\\{3,}", r"\\\\", text)
 
     out_lines: list[str] = []
     for raw in text.split("\n"):
@@ -147,7 +145,17 @@ def _check_copy_line(stripped: str) -> list[str]:
     parts = stripped.split()
     if len(parts) < 3:
         return [f"{parts[0]} needs source and destination: {stripped!r}"]
-    return []
+    issues: list[str] = []
+    # Flag ADD from remote URLs — prefer COPY + explicit download for
+    # auditability and layer-cache control.
+    if stripped.startswith("ADD "):
+        for src in parts[1:-1]:  # all but directive and last (dst)
+            if src.startswith(("http://", "https://", "ftp://")):
+                issues.append(
+                    f"ADD fetches a remote URL ({src}); prefer COPY + "
+                    "explicit download (curl/wget) for auditability"
+                )
+    return issues
 
 
 def _merge_continuation_lines(text: str) -> list[str]:

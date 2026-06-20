@@ -1371,7 +1371,14 @@ def render_user_prompt(cve: CveRecord, host: HostInfo, run_id: str = "") -> str:
         sanitize_exploit_text(cve.description, max_chars=300) if cve.description else ""
     )
     description_hint = _sanitized_desc or "(research via nvd_lookup)"
-    refs_block = "\n".join(f"- {r}" for r in cve.references) or "  (none provided)"
+    refs_block = (
+        "\n".join(
+            f"- {sanitize_exploit_text(r, max_chars=200)}"
+            for r in cve.references
+            if isinstance(r, str)
+        )
+        or "  (none provided)"
+    )
     run_id_block = (
         f"\n# Run identifier\n"
         f"- run_id: {run_id}\n"

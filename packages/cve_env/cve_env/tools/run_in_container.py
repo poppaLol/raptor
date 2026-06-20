@@ -29,10 +29,33 @@ from typing import Any
 
 from cve_env.utils.run import run_with_timeout
 
+_OWNER_CHECK_TIMEOUT = 5.0
 _STDOUT_CAP_BYTES = 8 * 1024
 _STDERR_CAP_BYTES = 4 * 1024
 _DEFAULT_TIMEOUT_SECONDS = 30.0
 _MAX_TIMEOUT_SECONDS = 300.0
+
+
+def _is_owned_container(container_id: str) -> bool:
+    """Return True only if the container carries the ``cve-env.owner=cve-env`` label.
+
+    Prevents the LLM agent from ``docker exec``-ing into arbitrary host
+    containers that it did not launch via ``docker_run`` / ``docker_compose_up``.
+    """
+    outcome = run_with_timeout(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            '{{index .Config.Labels "cve-env.owner"}}',
+            container_id,
+        ],
+        timeout=_OWNER_CHECK_TIMEOUT,
+    )
+    return (
+        outcome.returncode == 0
+        and (outcome.stdout or "").strip() == "cve-env"
+    )
 
 
 def _classify_exec_exit(exit_code: int, stderr: str) -> str:
@@ -103,6 +126,13 @@ def run_in_container(
             container_id="",
             command=command,
             reason="container_id is empty",
+        )
+    if not _is_owned_container(container_id):
+        return ExecResult(
+            ok=False,
+            container_id=container_id,
+            command=command,
+            reason="container is not owned by cve-env (missing label)",
         )
     if not command or not command.strip():
         return ExecResult(

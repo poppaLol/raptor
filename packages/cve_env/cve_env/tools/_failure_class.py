@@ -173,7 +173,7 @@ def classify_docker_stderr(stderr: str | bytes | None) -> DockerFailureClass:
     decision.
     """
     if not stderr:
-        return "transport"  # subprocess died w/o stderr → assume transport
+        return "unknown"  # subprocess died w/o stderr → no evidence to classify
     if isinstance(stderr, bytes):
         try:
             stderr = stderr.decode("utf-8", errors="replace")

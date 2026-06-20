@@ -47,10 +47,12 @@ _SECRET_TOKEN_RE = re.compile(
     r"|sk-ant-[A-Za-z0-9_-]{20,}"  # Anthropic API key
     r"|AKIA[0-9A-Z]{16}"  # AWS access key id
     r"|[Bb]earer\s+[A-Za-z0-9._-]{12,}"  # Authorization: Bearer <token>
+    r"|dckr_pat_[A-Za-z0-9_-]{20,}"  # Docker Hub PAT
+    r"|glpat-[A-Za-z0-9_-]{20,}"  # GitLab PAT
 )
 # Credentials embedded in a URL userinfo (``https://user:pass@host``), e.g. a
 # git-over-https token URL — drop the userinfo, keep scheme + host.
-_URL_CRED_RE = re.compile(r"(https?://)[^/\s:@]+:[^/\s@]+@")
+_URL_CRED_RE = re.compile(r"((?:https?|git|ssh)://)[^/\s:@]+:[^/\s@]+@")
 
 _REDACTED = "[REDACTED]"
 

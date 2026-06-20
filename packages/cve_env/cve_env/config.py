@@ -16,6 +16,24 @@ from pathlib import Path
 from typing import Any
 
 
+def _safe_float(name: str, default: float) -> float:
+    """Parse a float from env ``name``; fall back to ``default`` on absence or
+    malformed value (never raises at module scope)."""
+    try:
+        return float(os.environ.get(name) or default)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(name: str, default: int) -> int:
+    """Parse an int from env ``name``; fall back to ``default`` on absence or
+    malformed value (never raises at module scope)."""
+    try:
+        return int(os.environ.get(name) or default)
+    except (ValueError, TypeError):
+        return default
+
+
 # Optional TOML config file `cve-env.toml`.
 # Precedence (highest wins):
 #   1. Environment variable (CVE_ENV_<UPPER_SNAKE>)
@@ -36,7 +54,9 @@ def _load_toml_config() -> dict[str, Any]:
     in pyproject.toml)."""
     import tomllib
 
-    path_str = os.environ.get("CVE_ENV_CONFIG_FILE", "cve-env.toml")
+    path_str = os.environ.get("CVE_ENV_CONFIG_FILE", "")
+    if not path_str:
+        return {}
     path = Path(path_str)
     if not path.is_file():
         return {}
@@ -459,12 +479,7 @@ def get_enable_proprietary_verify_continuation() -> bool:
     already probed image_resolve (confirmed-negative class), so a
     genuinely-proprietary target costs ≤1 extra probe. Explicitly DISABLE with
     ``CVE_ENV_ENABLE_PROPRIETARY_VERIFY_CONTINUATION`` in {0, false, no, off}."""
-    v = (
-        os.environ.get("CVE_ENV_ENABLE_PROPRIETARY_VERIFY_CONTINUATION", "")
-        .strip()
-        .lower()
-    )
-    return v not in ("0", "false", "no", "off")
+    return _env_bool("CVE_ENV_ENABLE_PROPRIETARY_VERIFY_CONTINUATION", default=True)
 
 
 def get_enable_halt_on_verified_success() -> bool:
@@ -639,12 +654,12 @@ def stage_hard_budget_breach(stage_costs: dict[str, float]) -> str | None:
 # Adaptive cost extension constants. Mirrors the productive-extension for the
 # cost dimension. Defaults are deliberately conservative (1 × 10% by default);
 # users opt in to more aggressive behavior via env vars.
-COST_EXTENSION_PCT: float = float(os.environ.get("CVE_ENV_COST_EXTENSION_PCT", "0.10"))
+COST_EXTENSION_PCT: float = _safe_float("CVE_ENV_COST_EXTENSION_PCT", 0.10)
 """Multiplier applied to ``max_cost_usd`` on each granted extension.
 Default 0.10 (10% more budget). Override via env var
 ``CVE_ENV_COST_EXTENSION_PCT``."""
 
-MAX_COST_EXTENSIONS: int = int(os.environ.get("CVE_ENV_MAX_COST_EXTENSIONS", "1"))
+MAX_COST_EXTENSIONS: int = _safe_int("CVE_ENV_MAX_COST_EXTENSIONS", 1)
 """Maximum number of cost-cap extensions per CVE. Default 1 (single
 extension); set to 0 to fully disable adaptive extension. Override via env var
 ``CVE_ENV_MAX_COST_EXTENSIONS``."""
@@ -711,9 +726,7 @@ def get_disallowed_tools() -> list[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
-MAX_TOOL_ATTEMPT_EXTENSIONS: int = int(
-    os.environ.get("CVE_ENV_MAX_TOOL_ATTEMPT_EXTENSIONS", "2")
-)
+MAX_TOOL_ATTEMPT_EXTENSIONS: int = _safe_int("CVE_ENV_MAX_TOOL_ATTEMPT_EXTENSIONS", 2)
 """Max progress-aware extensions of a per-tool attempt cap.
 When a per-tool cap is exceeded BUT the agent made recent productive progress,
 the cap is extended (by ×base each time) up to this many times before firing.
@@ -868,10 +881,12 @@ def estimate_cost_from_turns(num_turns: int, model: str = MODEL) -> float:
 
 def _env_bool(name: str, default: bool = False) -> bool:
     """Parse a boolean env var. Truthy: 'true', '1', 'yes', 'on' (case-insensitive).
-    Falsy or unset returns ``default``. Unknown values also return default."""
+    Falsy: 'false', '0', 'no', 'off'. Unset or unknown values return ``default``."""
     val = os.environ.get(name, "").strip().lower()
     if val in ("true", "1", "yes", "on"):
         return True
+    if val in ("false", "0", "no", "off"):
+        return False
     return default
 
 

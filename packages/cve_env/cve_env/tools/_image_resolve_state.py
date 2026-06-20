@@ -25,6 +25,16 @@ from __future__ import annotations
 
 import os
 
+
+def _safe_int(name: str, default: int) -> int:
+    """Parse an int from env ``name``; fall back to ``default`` on absence or
+    malformed value (never raises at module scope)."""
+    try:
+        return int(os.environ.get(name) or default)
+    except (ValueError, TypeError):
+        return default
+
+
 # Per-product rate-limit budget. After 2 rate-limited resolves for the same
 # product (case-insensitive), the third call returns rate_limited_persistent
 # immediately.
@@ -40,12 +50,12 @@ _RATE_LIMIT_TOTAL_THRESHOLD: int = 3
 # One-shot cooldown + retry per CVE when ALL candidates in the initial loop
 # returned rate_limited.
 _RATE_LIMIT_COOLDOWN_DONE: bool = False
-_RATE_LIMIT_COOLDOWN_S: int = int(os.environ.get("CVE_ENV_RATE_LIMIT_COOLDOWN_S", "30"))
+_RATE_LIMIT_COOLDOWN_S: int = _safe_int("CVE_ENV_RATE_LIMIT_COOLDOWN_S", 30)
 
 # One-shot cooldown + retry per CVE when ALL candidates returned
 # transport-class (5xx / timeout / connection-reset).
 _TRANSPORT_COOLDOWN_DONE: bool = False
-_TRANSPORT_COOLDOWN_S: int = int(os.environ.get("CVE_ENV_TRANSPORT_COOLDOWN_S", "30"))
+_TRANSPORT_COOLDOWN_S: int = _safe_int("CVE_ENV_TRANSPORT_COOLDOWN_S", 30)
 
 # CVE-level cumulative arch_incompatible counter. After 2 different products
 # fail arch_incompatible, the 3rd image_resolve call returns

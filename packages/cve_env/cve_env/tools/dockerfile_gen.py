@@ -16,6 +16,8 @@ from typing import Any
 from cve_env.utils.dockerfile_hygiene import validate_dockerfile_semantics
 from cve_env.validators import validate_image_ref
 
+_APT_PACKAGE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9.+\-:=~]+$")
+
 
 @dataclass
 class DockerfileRenderResult:
@@ -161,6 +163,8 @@ def _validate_copy_ops(copy_ops: list[dict[str, str]]) -> list[str]:
             issues.append(f"copy_ops[{i}].dst must be a non-empty string")
         elif not dst.startswith("/"):
             issues.append(f"copy_ops[{i}].dst {dst!r} must be an absolute path")
+        elif ".." in dst.split("/"):
+            issues.append(f"copy_ops[{i}].dst {dst!r} must not contain '..'")
     return issues
 
 
@@ -223,6 +227,12 @@ def render_dockerfile(
     issues.extend(drift_issues)
 
     clean_apt = list(apt_packages or [])
+    for pkg in clean_apt:
+        if not isinstance(pkg, str) or not _APT_PACKAGE_RE.match(pkg):
+            issues.append(
+                f"apt_packages: {pkg!r} does not match allowed pattern "
+                f"(alphanumeric, dots, plus, hyphen, colon, equals, tilde)"
+            )
     if issues:
         return DockerfileRenderResult(ok=False, issues=issues, warnings=drift_warnings)
 

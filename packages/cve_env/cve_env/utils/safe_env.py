@@ -47,6 +47,11 @@ _DANGEROUS_ENV_VARS: frozenset[str] = frozenset(
         "DYLD_FALLBACK_LIBRARY_PATH",
         # Git command-channel hijacks.
         "GIT_SSH_COMMAND",
+        "GIT_SSH",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG",
+        "GIT_TEMPLATE_DIR",
         "GIT_EXEC_PATH",
         "GIT_PROXY_COMMAND",
         "GIT_TRACE",
@@ -59,6 +64,42 @@ _DANGEROUS_ENV_VARS: frozenset[str] = frozenset(
         "https_proxy",
         "http_proxy",
         "all_proxy",
+        # Docker daemon redirection.
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_VERIFY",
+        # Shell auto-exec hooks.
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        "CDPATH",
+        # Editor / pager (can shell-evaluate).
+        "TERMINAL",
+        "BROWSER",
+        "PAGER",
+        "VISUAL",
+        "EDITOR",
+        # TLS trust-store overrides (MITM via planted CA).
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "SSLKEYLOGFILE",
+        "NODE_EXTRA_CA_CERTS",
+        # Config-eval: tools that eval config files from env-pointed paths.
+        "OPENSSL_CONF",
+        "KUBECONFIG",
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "RUBYOPT",
+        "PERL5OPT",
+        "PERL5LIB",
+        # Allocator / gconv hijacks.
+        "MALLOC_CONF",
+        "GCONV_PATH",
     }
 )
 

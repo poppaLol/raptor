@@ -160,7 +160,7 @@ def rewrite_for_localhost(
     source_dir = compose_file.parent
     staging = Path(tempfile.mkdtemp(prefix="cveenv-compose-"))
     try:
-        shutil.copytree(source_dir, staging, dirs_exist_ok=True)
+        shutil.copytree(source_dir, staging, dirs_exist_ok=True, symlinks=True)
     except OSError:
         shutil.rmtree(staging, ignore_errors=True)
         raise
@@ -209,13 +209,16 @@ def _rewrite_ports_in_place(compose_file: Path, cve_id: str = "") -> None:
     """
     try:
         data = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return
+    except (OSError, yaml.YAMLError) as exc:
+        msg = f"cannot parse compose file {compose_file} for security rewrite: {exc}"
+        raise ComposeError(msg)
     if not isinstance(data, dict):
-        return
+        msg = f"compose file {compose_file} did not parse as a YAML mapping"
+        raise ComposeError(msg)
     services = data.get("services")
     if not isinstance(services, dict):
-        return
+        msg = f"compose file {compose_file} has no 'services' mapping"
+        raise ComposeError(msg)
     dangerous_caps = {
         "SYS_ADMIN",
         "SYS_PTRACE",
