@@ -23,6 +23,7 @@ branch instead of inside an ``except`` block.
 
 from __future__ import annotations
 
+import queue
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -99,11 +100,11 @@ def run_with_timeout(
     # child is reaped when this per-CVE process exits) and return
     # ``timed_out=True`` so the tool handler returns and clears ``_in_flight``,
     # instead of riding to the external wall.
-    box: dict[str, Any] = {}
+    result_q: queue.Queue[dict[str, Any]] = queue.Queue()
 
     def _target() -> None:
         try:
-            box["result"] = subprocess.run(
+            result_q.put({"result": subprocess.run(
                 cmd,
                 timeout=timeout,
                 cwd=cwd,
@@ -118,13 +119,13 @@ def run_with_timeout(
                 encoding="utf-8",
                 errors="replace",
                 check=False,
-            )
+            )})
         except subprocess.TimeoutExpired as exc:
-            box["timeout"] = exc
+            result_q.put({"timeout": exc})
         except FileNotFoundError as exc:
-            box["fnf"] = exc
+            result_q.put({"fnf": exc})
         except OSError as exc:
-            box["oserr"] = exc
+            result_q.put({"oserr": exc})
 
     worker = threading.Thread(target=_target, daemon=True)
     worker.start()
@@ -140,7 +141,8 @@ def run_with_timeout(
             ),
             timed_out=True,
         )
-    # worker finished ⇒ box is fully populated (assignment precedes thread death).
+    # worker finished ⇒ result_q has exactly one item (put precedes thread death).
+    box = result_q.get_nowait()
     if "timeout" in box:
         exc = box["timeout"]
         return RunOutcome(

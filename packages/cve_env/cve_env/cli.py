@@ -60,6 +60,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     from cve_env.utils.lifecycle import acquire_lock, release_lock
 
     lock_path = acquire_lock()
+    lock_released = False
 
     try:
         # Probe service health pre-run; pass any CRITICAL-service constraints
@@ -175,13 +176,16 @@ def _cmd_build(args: argparse.Namespace) -> int:
                     prune_images()
             # Release own lock BEFORE colima-stop so idle-check excludes us.
             release_lock(lock_path)
+            lock_released = True
             if auto_stop:
                 with contextlib.suppress(Exception):
                     stop_colima_if_idle()
         finally:
             # Defensive: even if the lifecycle import/dispatch raised,
-            # the lock must be released.
-            release_lock(lock_path)
+            # the lock must be released. Guarded so a second release_lock
+            # cannot delete a different process's lock.
+            if not lock_released:
+                release_lock(lock_path)
 
 
 # Stage-grouped end-of-run report. Maps tool names to the pipeline stage

@@ -31,9 +31,20 @@ LOCK_SUFFIX = ".lock"
 
 def acquire_lock() -> Path:
     """Create a per-PID lockfile so concurrent builds can be detected.
-    Caller must invoke :func:`release_lock` on the returned path before exit."""
+    Caller must invoke :func:`release_lock` on the returned path before exit.
+
+    Uses exclusive-create mode (``"x"``) so two processes racing on the
+    same PID-scoped path do not silently clobber each other's lock.
+    ``FileExistsError`` (stale lock from a recycled PID) is tolerated
+    with a warning and an overwrite.
+    """
     path = LOCK_DIR / f"{LOCK_PREFIX}{os.getpid()}{LOCK_SUFFIX}"
-    path.write_text(str(os.getpid()))
+    try:
+        with path.open("x") as fh:
+            fh.write(str(os.getpid()))
+    except FileExistsError:
+        logger.warning("stale lockfile %s already exists; overwriting", path)
+        path.write_text(str(os.getpid()))
     return path
 
 

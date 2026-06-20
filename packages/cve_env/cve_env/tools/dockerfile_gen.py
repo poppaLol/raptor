@@ -89,7 +89,13 @@ def _detect_dep_drift(
         if not isinstance(step, str):
             continue
         # P21: apt-get update without immediate version-pinned install on the same RUN.
-        if _APT_GET_UPDATE_RE.search(step) and "=" not in step:
+        # Only fire when the step also contains an install command — a standalone
+        # `apt-get update` (no install) cannot pull packages.
+        if (
+            _APT_GET_UPDATE_RE.search(step)
+            and _APT_INSTALL_RE.search(step)
+            and "=" not in step
+        ):
             hard_issues.append(
                 f"P21: install_steps[{i}]: contains `apt-get update` without "
                 "version-pinned install on the same RUN — pulls latest "
@@ -237,7 +243,8 @@ def render_dockerfile(
         return DockerfileRenderResult(ok=False, issues=issues, warnings=drift_warnings)
 
     lines: list[str] = [f"FROM {base_image}"]
-    lines.append(f"WORKDIR {workdir}")
+    if workdir:
+        lines.append(f"WORKDIR {workdir}")
     # When `apt_unsafe=True`, wrap apt-get with flags that bypass GPG
     # signature + valid-until checks. ONLY safe in disposable build
     # containers; never use in production. Mitigates "At least one invalid

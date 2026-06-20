@@ -113,7 +113,7 @@ def run_in_container(
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
     workdir: str = "",
 ) -> ExecResult:
-    """Execute ``command`` in ``container_id`` via ``docker exec -i``.
+    """Execute ``command`` in ``container_id`` via ``docker exec``.
 
     ``command`` is run through ``sh -c`` so the agent can use shell
     syntax (pipes, redirects, env vars). Output is capped to

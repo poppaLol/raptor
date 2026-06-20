@@ -394,7 +394,7 @@ def docker_build(
     # failed with `reason_class=gpg_signature`, the agent must call
     # `dockerfile_gen` with `apt_unsafe=True` OR pivot the base image — same
     # Dockerfile WILL fail again deterministically.
-    if image_tag and tag in _PENDING_GPG_RECOVERY:
+    if tag in _PENDING_GPG_RECOVERY:
         return BuildResult(
             ok=False,
             blocked=True,
@@ -418,7 +418,7 @@ def docker_build(
         )
 
     pending = _PENDING_SUGGESTED_PATCH.get(tag)
-    if pending and image_tag:
+    if pending:
         # Only block when the agent explicitly passed image_tag (so
         # auto-generated random tags from a fresh dockerfile_gen aren't
         # caught — those have unique tags).

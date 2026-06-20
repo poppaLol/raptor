@@ -10,10 +10,13 @@ were consumed. Tune caps here; everything else derives.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_float(name: str, default: float) -> float:
@@ -42,8 +45,7 @@ def _safe_int(name: str, default: int) -> int:
 #
 # Loaded once at module init. Path resolution:
 #   1. `CVE_ENV_CONFIG_FILE` env var if set
-#   2. `cve-env.toml` in CWD
-#   3. None → empty dict; no errors raised
+#   2. None → empty dict; no errors raised
 #
 # Requires Python 3.11+ for stdlib `tomllib`. cve-env's pyproject pins
 # 3.11+ via build-system requirements.
@@ -703,6 +705,12 @@ def get_tool_attempt_cap(tool_name: str) -> int:
     try:
         return int(val)
     except ValueError:
+        logger.warning(
+            "ignoring malformed %s=%r (not an integer); using default %d",
+            env_key,
+            val,
+            default,
+        )
         return default
 
 

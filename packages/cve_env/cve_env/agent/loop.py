@@ -192,9 +192,9 @@ def _classify_api_overload(final_text: str) -> str:
     """
     if not isinstance(final_text, str) or not final_text:
         return ""
-    # Anchored pattern: must start with the API-Overload wrapper.
+    # Anchored pattern: final_text must start with the API-Overload wrapper.
     # The full canonical form is "API Error: Repeated 529 Overloaded errors. ..."
-    if "API Error: Repeated 529 Overloaded errors" in final_text:
+    if final_text.startswith("API Error: Repeated 529 Overloaded errors"):
         return "api_overload"
     return ""
 
@@ -1534,7 +1534,7 @@ async def build(
         run_id=run_id,
         root=audit_root or AGENTIC_AUDIT_ROOT,
     )
-    audit_path = writer.run_root / f"{cve.cve_id}.jsonl"
+    audit_path = writer._path_for(cve_id=cve.cve_id)
     refusal_scanner = RefusalScanner(
         project="cve-env",
         cve_id=cve.cve_id,
@@ -2089,10 +2089,22 @@ async def build(
 
         # If give_up.terminal=True was processed in this on_message call (or any
         # prior), halt the SDK iteration. on_message's audit write for the give_up
-        # tool result has already happened above by the time we reach this point.
-        # Raise after audit so triage sees the give_up event but no spurious tool
-        # calls beyond it.
+        # tool result has already happened above by the time we reach this point
+        # (for agent-issued give_ups). For per-tool attempt cap give_ups, the
+        # GiveUpReceived fires before the tool_result arrives — write a tool_error
+        # entry so the audit trail is complete.
         if state.give_up_reason:
+            if state.give_up_reason.startswith("max_tool_attempts_"):
+                _cap_tool = state.give_up_reason[len("max_tool_attempts_"):]
+                writer.write(
+                    cve_id=cve.cve_id,
+                    entry=AuditEntry(
+                        turn=state.turn,
+                        status="tool_error",
+                        tool_name=_cap_tool,
+                        reason=state.give_up_detail or "tool attempt cap exceeded",
+                    ),
+                )
             raise GiveUpReceived(
                 f"agent issued give_up(reason={state.give_up_reason!r})"
             )
@@ -2301,7 +2313,7 @@ async def build(
             final_text=state.final_text,
             tool_names_called=[u["name"] for u in state.tool_uses_seen],
             error=str(exc) if terminal_status_on_err == "error" else "",
-            audit_path=writer.run_root / f"{cve.cve_id}.jsonl",
+            audit_path=writer._path_for(cve_id=cve.cve_id),
             # Refusal count from RefusalScanner + SDK-level latch. len(events)
             # captures pattern-matched refusals (LLM text + SDK error wrappers);
             # + 1 if the SDK ResultMessage had a refusal stop_reason but no text
@@ -2480,7 +2492,7 @@ async def build(
                 max_turns=max(2, sdk_max_turns - cont_turns_acc),
                 max_cost_usd=max_cost_usd,
                 on_message=on_message,
-                resume=run.session_id,
+                resume=state.last_session_id or run.session_id,
                 verify_passed_check=lambda: state.verify_passed,
             )
         except Exception:  # noqa: BLE001 -- a continuation that raises just stops the loop

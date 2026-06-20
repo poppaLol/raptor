@@ -489,20 +489,29 @@ class SourceBuilder:
         return tag
 
     def _list_tags_via_api(self, owner: str, repo: str) -> list[str]:
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=100"
-        try:
-            data = _http_get_json(api_url, timeout=self.config.http_timeout_seconds)
-        except OSError:
-            return []
-        if not isinstance(data, list):
-            return []
         out: list[str] = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            if isinstance(name, str) and name:
-                out.append(name)
+        api_url: str | None = (
+            f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=100"
+        )
+        max_pages = 10
+        for _ in range(max_pages):
+            if api_url is None:
+                break
+            try:
+                data, next_url = _http_get_json_paginated(
+                    api_url, timeout=self.config.http_timeout_seconds
+                )
+            except OSError:
+                break
+            if not isinstance(data, list):
+                break
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                if isinstance(name, str) and name:
+                    out.append(name)
+            api_url = next_url
         return out
 
     def _download_tarball(self, owner: str, repo: str, tag: str, target: Path) -> bool:
@@ -627,6 +636,8 @@ class SourceBuilder:
             warnings.append(
                 f"git clone failed for SHA checkout: {outcome.stderr.strip()[:200]}"
             )
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
             return _CloneOutcome(tag=None, warnings=warnings, needs_checkout=False)
         if not self._checkout(target, sha):
             warnings.append(f"git checkout {sha[:10]}... failed")
@@ -760,6 +771,53 @@ def _http_get_json(url: str, *, timeout: int) -> Any:
         return json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
+
+
+_LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
+
+
+def _http_get_json_paginated(url: str, *, timeout: int) -> tuple[Any, str | None]:
+    """Like :func:`_http_get_json` but also returns the ``next`` page URL
+    from the ``Link`` response header (or ``None`` when there is no next page).
+    """
+    if not url.startswith("https://"):
+        raise ValueError(
+            f"_http_get_json_paginated requires https:// URL, got: {url!r}"
+        )
+    headers = {"Accept": "application/vnd.github+json"}
+    headers.update(_github_auth_headers())
+    req = urllib.request.Request(url, headers=headers)  # noqa: S310 — scheme validated above
+    next_url: str | None = None
+    try:
+        with _urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                return None, None
+            # Parse Link header for pagination.
+            link_header = resp.headers.get("Link", "")
+            m = _LINK_NEXT_RE.search(link_header)
+            if m:
+                candidate = m.group(1)
+                if candidate.startswith("https://"):
+                    next_url = candidate
+            payload = resp.read(_MAX_JSON_BYTES + 1)
+            if len(payload) > _MAX_JSON_BYTES:
+                logger.warning(
+                    "source_build: JSON response over cap %d B from %s — ignoring",
+                    _MAX_JSON_BYTES,
+                    url,
+                )
+                return None, None
+    except urllib.error.HTTPError:
+        return None, None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, OSError):
+            raise exc.reason from exc
+        return None, None
+    try:
+        return json.loads(payload.decode("utf-8")), next_url
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, None
 
 
 def _http_get_bytes(url: str, *, timeout: int) -> bytes | None:

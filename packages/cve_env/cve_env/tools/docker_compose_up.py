@@ -129,7 +129,17 @@ def _extract_container_ports(spec: Any) -> list[int]:
             text = str(p)
             tail = text.rsplit(":", 1)[-1]
             tail = tail.split("/", 1)[0]  # strip "/tcp"
-            tail = tail.split("-", 1)[-1]  # accept "80-81" by picking the higher
+            if "-" in tail:
+                # Port range like "80-81": expose every port in the range.
+                parts = tail.split("-", 1)
+                try:
+                    lo, hi = int(parts[0]), int(parts[1])
+                except ValueError:
+                    lo = hi = -1
+                for port in range(lo, hi + 1):
+                    if 0 < port < 65536:
+                        out.append(port)
+                continue
             try:
                 target = int(tail)
             except ValueError:
@@ -165,7 +175,11 @@ def rewrite_for_localhost(
         shutil.rmtree(staging, ignore_errors=True)
         raise
     staged_compose = staging / compose_file.name
-    _rewrite_ports_in_place(staged_compose, cve_id=cve_id)
+    try:
+        _rewrite_ports_in_place(staged_compose, cve_id=cve_id)
+    except ComposeError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return staged_compose, staging
 
 
@@ -583,7 +597,7 @@ def docker_compose_up_payload(
 
     try:
         rewritten, staging = rewrite_for_localhost(compose_path, cve_id=cve_id)
-    except OSError as exc:
+    except (OSError, ComposeError) as exc:
         return {
             "ok": False,
             "reason": f"could not stage compose dir: {exc}",

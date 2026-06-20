@@ -300,6 +300,7 @@ def docker_run(
         return RunResult(
             ok=False,
             reason="duplicate_failing_attempt",
+            reason_class="unknown",
             stderr=(
                 f"(image={image!r}, platform={platform!r}) already failed in this run. "
                 "Change the image ref or the platform argument before retrying. "
@@ -334,6 +335,22 @@ def docker_run(
         cmd.extend(["--label", f"cve-env.run-id={run_id}"])
     if platform:
         cmd.extend(["--platform", platform])
+    # Reject env keys containing '=' — an LLM-controlled key like "FOO=BAR"
+    # would produce `-e FOO=BAR=value`, creating misnamed env var "FOO" with
+    # value "BAR=value" inside the container.
+    if env:
+        bad_keys = [k for k in env if "=" in k]
+        if bad_keys:
+            return RunResult(
+                ok=False,
+                reason="invalid_env_key",
+                reason_class="unknown",
+                stderr=f"env key(s) contain '=': {bad_keys!r}",
+                next_step_hint=(
+                    "env dict keys must not contain '='. Fix the key names "
+                    "and retry."
+                ),
+            )
     for k, v in (env or {}).items():
         cmd.extend(["-e", f"{k}={v}"])
     # Force fresh pull for registry-pulled images. Bypasses the local Docker
