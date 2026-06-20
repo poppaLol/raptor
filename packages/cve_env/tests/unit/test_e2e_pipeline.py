@@ -39,6 +39,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
 
 from cve_env.agent.llm import AgentRunOutcome
 from cve_env.agent.loop import build

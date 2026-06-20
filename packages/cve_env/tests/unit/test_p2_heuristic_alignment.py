@@ -26,6 +26,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.loop import _is_version_assertion_exec_check
 from cve_env.config import VERSION_ASSERTION_CMD_PATTERN
 

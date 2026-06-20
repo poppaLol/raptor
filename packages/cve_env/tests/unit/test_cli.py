@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
 
 from cve_env import cli
 from cve_env.models import Outcome

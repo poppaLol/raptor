@@ -30,6 +30,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.loop import _accum_tokens, _StreamState
 
 

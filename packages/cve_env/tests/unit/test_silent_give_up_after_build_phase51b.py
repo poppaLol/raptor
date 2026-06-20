@@ -29,6 +29,9 @@ in 51.B.2 (runtime) + 51.B.3 (prompt).
 from __future__ import annotations
 
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.loop import _map_status, _StreamState
 
 

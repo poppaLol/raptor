@@ -20,6 +20,9 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import patch
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent import tools
 from cve_env.tools.docker_build import BuildResult
 

@@ -10,6 +10,9 @@ import asyncio
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.tools import nvd_lookup, reset_nvd_lookup_state
 
 

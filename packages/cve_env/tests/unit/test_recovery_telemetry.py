@@ -31,6 +31,7 @@ import json
 from pathlib import Path
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
 
 from cve_env.agent.audit import AuditEntry
 from cve_env.agent.loop import _StreamState

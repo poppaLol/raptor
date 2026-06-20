@@ -24,6 +24,9 @@ from __future__ import annotations
 import pytest
 
 from cve_env import config
+
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.llm import SuccessReached
 from cve_env.agent.loop import (
     _StreamState,

@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.loop import build
 
 # Reuse the existing test_loop helpers verbatim — we're in the same dir.

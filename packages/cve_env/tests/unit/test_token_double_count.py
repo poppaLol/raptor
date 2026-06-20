@@ -14,6 +14,9 @@ also covers give_up runs that never reach a terminal ResultMessage).
 
 from __future__ import annotations
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.loop import _accum_tokens, _merge_cumulative_tokens, _StreamState
 
 

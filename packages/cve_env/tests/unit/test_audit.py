@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent.audit import AuditEntry, AuditWriter, _sanitize_cve_id
 
 

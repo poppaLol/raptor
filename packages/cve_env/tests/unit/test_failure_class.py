@@ -48,9 +48,9 @@ from cve_env.tools._failure_class import classify_docker_stderr, is_retry_eligib
         ("Could not resolve host: registry-1.docker.io", "network"),
         # unknown / fallback
         ("some bizarre error nobody has ever seen", "unknown"),
-        # empty stderr → assume transport (subprocess died)
-        ("", "transport"),
-        (None, "transport"),
+        # empty stderr → no evidence to classify
+        ("", "unknown"),
+        (None, "unknown"),
     ],
 )
 def test_classify_docker_stderr_known_patterns(

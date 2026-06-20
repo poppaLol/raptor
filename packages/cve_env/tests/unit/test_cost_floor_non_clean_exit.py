@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
 
 from cve_env.agent.loop import _floor_cost, build
 from cve_env.config import MODEL, estimate_cost_from_tokens, estimate_cost_from_turns

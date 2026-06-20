@@ -21,6 +21,9 @@ import os
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from cve_env.agent import llm
 from cve_env.config import get_disallowed_tools
 

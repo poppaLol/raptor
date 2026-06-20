@@ -10,6 +10,8 @@ fails CI if anything drifts.
 from __future__ import annotations
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
+
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server
 
 from cve_env.agent.tools import ALL_TOOLS, TOOL_NAMES, get_tool_by_name

@@ -5,10 +5,21 @@ verification of non-HTTP / local-exec CVEs.
 from __future__ import annotations
 
 import subprocess
-from typing import Any
+from typing import Any, Generator
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from cve_env.tools.run_in_container import run_in_container
+
+
+@pytest.fixture(autouse=True)
+def _bypass_ownership_check() -> Generator[None, None, None]:
+    """All tests in this file assume a cve-env-owned container."""
+    with patch(
+        "cve_env.tools.run_in_container._is_owned_container", return_value=True
+    ):
+        yield
 
 
 def test_rejects_empty_container_id() -> None:
@@ -186,3 +197,16 @@ def test_reason_class_transport_on_timeout(mock_run: Any) -> None:
     r = run_in_container(container_id="cid", command="long_running")
     assert r.ok is False
     assert r.reason_class == "transport"
+
+
+# -- Ownership validation ------------------------------------------------
+
+
+@patch(
+    "cve_env.tools.run_in_container._is_owned_container",
+    return_value=False,
+)
+def test_rejects_unowned_container(_mock_own: Any) -> None:
+    r = run_in_container(container_id="foreign", command="echo hi")
+    assert r.ok is False
+    assert "not owned by cve-env" in r.reason

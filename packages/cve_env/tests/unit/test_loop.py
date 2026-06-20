@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+pytest.importorskip("claude_agent_sdk")
 
 from cve_env.agent.llm import AgentRunOutcome
 from cve_env.agent.loop import _mcp_suffix, _parse_tool_result_payload, build
