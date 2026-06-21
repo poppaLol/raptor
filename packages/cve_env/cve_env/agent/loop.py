@@ -2402,7 +2402,7 @@ async def build(
             state.give_up_detail = saved_give_up_detail
             state.verify_attempted = saved_verify_attempted
             break
-        cont_cost_acc += state.last_cost_usd or run.total_cost_usd or 0.0
+        cont_cost_acc += run.total_cost_usd or 0.0
         cont_turns_acc += run.num_turns or 0
         # Restore the proprietary give_up UNLESS the probe improved things: a
         # successful build/launch, verify_passed, or a fresh terminal give_up the
@@ -2470,7 +2470,7 @@ async def build(
             state.give_up_detail = saved_give_up_detail
             state.verify_attempted = saved_verify_attempted
             break
-        cont_cost_acc += state.last_cost_usd or run.total_cost_usd or 0.0
+        cont_cost_acc += run.total_cost_usd or 0.0
         cont_turns_acc += run.num_turns or 0
         # Restore the original give_up UNLESS the continuation improved —
         # reached verify_passed, a successful build/launch, or a fresh terminal
@@ -2516,7 +2516,7 @@ async def build(
             )
         except Exception:  # noqa: BLE001 -- a continuation that raises just stops the loop
             break
-        cont_cost_acc += state.last_cost_usd or run.total_cost_usd or 0.0
+        cont_cost_acc += run.total_cost_usd or 0.0
         cont_turns_acc += run.num_turns or 0
 
     # benign-verify continuation (agentic, env-gated default-off): a POST-LAUNCH
@@ -2559,7 +2559,7 @@ async def build(
             )
         except Exception:  # noqa: BLE001 -- a continuation that raises just stops the loop
             break
-        cont_cost_acc += state.last_cost_usd or run.total_cost_usd or 0.0
+        cont_cost_acc += run.total_cost_usd or 0.0
         cont_turns_acc += run.num_turns or 0
 
     status, reason = _map_status(run.stop_reason, state)

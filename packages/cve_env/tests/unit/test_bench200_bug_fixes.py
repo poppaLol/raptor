@@ -510,8 +510,8 @@ def test_B2_give_up_branch_ordered_before_runtime_cap_exceptions() -> None:
     except_idx = src.index("except Exception as exc")
     handler_src = src[except_idx:]
     give_idx = handler_src.find("elif state.give_up_reason")
-    turn_idx = handler_src.find('"TurnCapReached"')
-    budget_idx = handler_src.find('"BudgetCapExceeded"')
+    turn_idx = handler_src.find("TurnCapReached")
+    budget_idx = handler_src.find("BudgetCapExceeded")
     assert give_idx > 0, (
         "B-2 missing: no `elif state.give_up_reason:` branch in build()'s "
         "except handler — give_up classification will be skipped"
